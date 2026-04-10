@@ -1,0 +1,7 @@
+{
+  "name": "Ticketboom Validator v2",
+  "description": "Aplicación de validación de entradas para Ticketboom mediante escaneo de QR y carga de CSV.\nV2: compartición del mismo csv entre dispositivos",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

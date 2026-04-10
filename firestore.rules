@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Ticketboom Validator - Public Access with Client-Side Passwords
+    // ===============================================================
+
+    match /events/{eventId} {
+      // Anyone can see the list of events
+      allow read: if true;
+      // Anyone can create a new event
+      allow create: if true;
+      // Anyone can update an event (e.g., to set/change password)
+      allow update: if true;
+      // Anyone can delete an event
+      allow delete: if true;
+
+      match /attendees/{attendeeId} {
+        // Anyone can read/write attendees
+        // Access is controlled client-side via the event password
+        allow read: if true;
+        allow write: if true;
+      }
+    }
+  }
+}

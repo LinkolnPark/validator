@@ -1,0 +1,17 @@
+{
+  "name": "Ticketboom Validator",
+  "short_name": "TB Validator",
+  "description": "Validador de entradas para eventos Ticketboom",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "icons": [
+    {
+      "src": "https://ticketboom.es/wp-content/uploads/2023/04/Logo-Ticketboom-Vertical-Blanco.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

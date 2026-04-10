@@ -1,0 +1,61 @@
+{
+  "entities": {
+    "Event": {
+      "title": "Event",
+      "description": "Represents a ticketed event (e.g., city and year).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the event (e.g., 'Getafe 2026')."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the event was created."
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the user who created the event."
+        }
+      },
+      "required": ["name", "createdAt", "createdBy"]
+    },
+    "Attendee": {
+      "title": "Attendee",
+      "description": "Represents an attendee for a specific event.",
+      "type": "object",
+      "properties": {
+        "Nombre": { "type": "string" },
+        "Apellidos": { "type": "string" },
+        "Correo electrónico": { "type": "string" },
+        "Fecha de compra": { "type": "string" },
+        "Tipo de entrada": { "type": "string" },
+        "Precio original": { "type": "string" },
+        "Gastos de gestion": { "type": "string" },
+        "Cupon usado": { "type": "string" },
+        "Codigo del cupon": { "type": "string" },
+        "Descuento aplicado": { "type": "string" },
+        "Precio pagado": { "type": "string" },
+        "Ticket ID": { "type": "string" },
+        "Código QR": { "type": "string" },
+        "Pregunta en Checkout": { "type": "string" },
+        "Respuesta en Checkout": { "type": "string" },
+        "validated": { "type": "boolean" },
+        "validationTime": { "type": "string" },
+        "validatedBy": { "type": "string" }
+      },
+      "required": ["Código QR", "validated"]
+    }
+  },
+  "firestore": {
+    "/events/{eventId}": {
+      "schema": "Event",
+      "description": "Collection of events."
+    },
+    "/events/{eventId}/attendees/{attendeeId}": {
+      "schema": "Attendee",
+      "description": "Subcollection of attendees for a specific event."
+    }
+  }
+}
