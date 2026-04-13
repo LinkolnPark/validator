@@ -82,14 +82,35 @@ function AppContent() {
   const html5QrCodeRef = useRef<any>(null);
   const lastScannedRef = useRef<{ code: string; time: number } | null>(null);
 
-  // Persistence
+  // Persistence & History
   useEffect(() => {
     if (selectedEventId) {
       localStorage.setItem('selectedEventId', selectedEventId);
+      // Push state to history for back button support
+      if (window.history.state?.eventId !== selectedEventId) {
+        window.history.pushState({ eventId: selectedEventId }, '', '');
+      }
     } else {
       localStorage.removeItem('selectedEventId');
+      // If we are going back to events list, ensure history reflects it
+      if (window.history.state?.eventId) {
+        window.history.pushState({ eventId: null }, '', '');
+      }
     }
   }, [selectedEventId]);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (event.state && event.state.eventId !== undefined) {
+        setSelectedEventId(event.state.eventId);
+      } else {
+        setSelectedEventId(null);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('unlockedEvents', JSON.stringify(unlockedEvents));
@@ -365,35 +386,50 @@ function AppContent() {
     let scannerInstance: any = null;
 
     const initScanner = async () => {
-      if (activeTab === 'scan' && attendees.length > 0) {
+      if (activeTab === 'scan' && attendees.length > 0 && selectedEvent) {
         setCameraError(null);
         setIsScannerActive(false);
         
         // Wait for AnimatePresence and DOM rendering
-        await new Promise(resolve => setTimeout(resolve, 600));
+        await new Promise(resolve => setTimeout(resolve, 1000));
         if (!isMounted) return;
 
         const readerElement = document.getElementById("reader");
-        if (!readerElement) return;
+        if (!readerElement) {
+          console.warn("Reader element not found yet, retrying...");
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          if (!document.getElementById("reader")) return;
+        }
 
         try {
           const { Html5Qrcode } = await import('html5-qrcode');
-          scannerInstance = new Html5Qrcode("reader");
+          
+          if (html5QrCodeRef.current) {
+            try {
+              await html5QrCodeRef.current.clear();
+            } catch (e) {
+              console.warn("Cleanup of previous scanner failed", e);
+            }
+          }
+
+          scannerInstance = new Html5Qrcode("reader", { verbose: false });
           
           const config = { 
             fps: 20, 
-            qrbox: { width: 250, height: 250 },
+            qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+              const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+              const qrboxSize = Math.floor(minEdge * 0.7);
+              return { width: qrboxSize, height: qrboxSize };
+            },
             aspectRatio: 1.0,
             showTorchButtonIfSupported: true
           };
 
-          // On Android, sometimes we need to request permissions explicitly or wait for a user gesture
-          // We'll try to get cameras first which triggers the prompt
           let cameras: any[] = [];
           try {
             cameras = await Html5Qrcode.getCameras();
           } catch (e) {
-            console.warn("Initial camera fetch failed, will try facingMode directly", e);
+            console.warn("Initial camera fetch failed", e);
           }
 
           let targetCameraId: any = { facingMode: "environment" };
@@ -412,9 +448,12 @@ function AppContent() {
                 !c.label.toLowerCase().includes('gran angular')
               );
               targetCameraId = mainCamera ? mainCamera.id : backCameras[0].id;
+            } else {
+              targetCameraId = cameras[0].id;
             }
           }
 
+          // In some environments (like iframes), we might need to try multiple times
           await scannerInstance.start(
             targetCameraId, 
             config,
@@ -433,7 +472,12 @@ function AppContent() {
         } catch (err: any) {
           console.error("Scanner start error:", err);
           if (isMounted) {
-            setCameraError("No se pudo iniciar la cámara. Pulsa el botón para reintentar o revisa los permisos del navegador.");
+            let msg = "No se pudo iniciar la cámara.";
+            if (err?.message?.includes("Permission denied")) msg = "Permiso de cámara denegado. Por favor, actívalo en los ajustes del navegador.";
+            else if (err?.message?.includes("NotFound")) msg = "No se encontró ninguna cámara disponible.";
+            else msg = err?.message || msg;
+            
+            setCameraError(msg);
             setIsScannerActive(false);
           }
         }

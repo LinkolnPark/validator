@@ -37,9 +37,14 @@ export class ErrorBoundary extends React.Component<Props, State> {
       
       try {
         if (this.state.error?.message) {
-          const parsed = JSON.parse(this.state.error.message);
-          if (parsed.error) {
-            errorMessage = `Error de base de datos: ${parsed.error}`;
+          // Check if it's our JSON error from handleFirestoreError
+          if (this.state.error.message.trim().startsWith('{')) {
+            const parsed = JSON.parse(this.state.error.message);
+            if (parsed.error) {
+              errorMessage = `Error de base de datos: ${parsed.error}`;
+            }
+          } else {
+            errorMessage = this.state.error.message;
           }
         }
       } catch (e) {
