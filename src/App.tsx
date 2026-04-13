@@ -383,7 +383,7 @@ function AppContent() {
 
   useEffect(() => {
     let isMounted = true;
-    let scannerInstance: any = null;
+    let scanner: any = null;
 
     const initScanner = async () => {
       if (activeTab === 'scan' && attendees.length > 0 && selectedEvent) {
@@ -395,66 +395,50 @@ function AppContent() {
         if (!isMounted) return;
 
         const readerElement = document.getElementById("reader");
-        if (!readerElement) {
-          console.warn("Reader element not found yet, retrying...");
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          if (!document.getElementById("reader")) return;
-        }
+        if (!readerElement) return;
 
         try {
+          // Check for camera support
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("Tu navegador no soporta el acceso a la cámara o no estás en una conexión segura (HTTPS).");
+          }
+
           const { Html5Qrcode } = await import('html5-qrcode');
           
+          // Cleanup any global state if possible
           if (html5QrCodeRef.current) {
             try {
+              if (html5QrCodeRef.current.isScanning) {
+                await html5QrCodeRef.current.stop();
+              }
               await html5QrCodeRef.current.clear();
             } catch (e) {
               console.warn("Cleanup of previous scanner failed", e);
             }
           }
 
-          scannerInstance = new Html5Qrcode("reader", { verbose: false });
+          scanner = new Html5Qrcode("reader", { verbose: false });
           
           const config = { 
             fps: 20, 
-            qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-              const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-              const qrboxSize = Math.floor(minEdge * 0.7);
-              return { width: qrboxSize, height: qrboxSize };
-            },
+            qrbox: { width: 250, height: 250 },
             aspectRatio: 1.0,
             showTorchButtonIfSupported: true
           };
 
-          let cameras: any[] = [];
-          try {
-            cameras = await Html5Qrcode.getCameras();
-          } catch (e) {
-            console.warn("Initial camera fetch failed", e);
-          }
-
           let targetCameraId: any = { facingMode: "environment" };
-
-          if (cameras && cameras.length > 0) {
-            const backCameras = cameras.filter(c => 
-              !c.label.toLowerCase().includes('front') && 
-              !c.label.toLowerCase().includes('selfie') &&
-              !c.label.toLowerCase().includes('delantera')
-            );
-
-            if (backCameras.length > 0) {
-              const mainCamera = backCameras.find(c => 
-                !c.label.toLowerCase().includes('wide') && 
-                !c.label.toLowerCase().includes('ultra') &&
-                !c.label.toLowerCase().includes('gran angular')
-              );
-              targetCameraId = mainCamera ? mainCamera.id : backCameras[0].id;
-            } else {
-              targetCameraId = cameras[0].id;
+          
+          try {
+            const cameras = await Html5Qrcode.getCameras();
+            if (cameras && cameras.length > 0) {
+              const back = cameras.find(c => /back|trasera|rear|environment/i.test(c.label));
+              targetCameraId = back ? back.id : cameras[0].id;
             }
+          } catch (e) {
+            console.warn("getCameras failed, falling back to facingMode", e);
           }
 
-          // In some environments (like iframes), we might need to try multiple times
-          await scannerInstance.start(
+          await scanner.start(
             targetCameraId, 
             config,
             (decodedText: string) => {
@@ -464,10 +448,11 @@ function AppContent() {
           );
           
           if (isMounted) {
-            html5QrCodeRef.current = scannerInstance;
+            html5QrCodeRef.current = scanner;
             setIsScannerActive(true);
           } else {
-            await scannerInstance.stop();
+            await scanner.stop();
+            await scanner.clear();
           }
         } catch (err: any) {
           console.error("Scanner start error:", err);
@@ -488,12 +473,19 @@ function AppContent() {
 
     return () => {
       isMounted = false;
-      if (scannerInstance) {
-        scannerInstance.stop().catch((e: any) => console.error("Scanner cleanup error:", e));
+      if (scanner) {
+        const s = scanner;
+        if (s.isScanning) {
+          s.stop().catch(() => {}).finally(() => {
+            s.clear().catch(() => {});
+          });
+        } else {
+          s.clear().catch(() => {});
+        }
       }
       html5QrCodeRef.current = null;
     };
-  }, [activeTab, attendees.length, scannerRetry]);
+  }, [activeTab, attendees.length, selectedEvent, scannerRetry]);
 
   const filteredAttendees = useMemo(() => {
     return attendees.filter(a => {
@@ -884,7 +876,7 @@ function AppContent() {
               className="flex flex-col gap-3 h-full max-h-full"
             >
               <div className="relative bg-black rounded-2xl overflow-hidden aspect-square max-w-[280px] w-full mx-auto shadow-2xl border-2 border-white shrink-0">
-                <div id="reader" className="w-full h-full"></div>
+                <div id="reader" key={`reader-${scannerRetry}`} className="w-full h-full"></div>
                 {!isScannerActive && !cameraError && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-900 text-white p-6 text-center">
                     <RefreshCw className="w-8 h-8 animate-spin mb-4 text-blue-500" />
