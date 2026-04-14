@@ -82,6 +82,63 @@ function AppContent() {
   const html5QrCodeRef = useRef<any>(null);
   const lastScannedRef = useRef<{ code: string; time: number } | null>(null);
 
+  // Audio System
+  const playSound = (type: 'success' | 'error') => {
+    try {
+      const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContext) return;
+      
+      const ctx = new AudioContext();
+      // Resume context if suspended (common in some browsers)
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      if (type === 'success') {
+        // High pitched bright double beep - Triangle wave is much more audible
+        osc.type = 'triangle';
+        
+        // Pulse 1
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.8, ctx.currentTime + 0.01);
+        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.1);
+        
+        // Pulse 2
+        osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.12);
+        gain.gain.setValueAtTime(0, ctx.currentTime + 0.12);
+        gain.gain.linearRampToValueAtTime(0.8, ctx.currentTime + 0.13);
+        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.25);
+        
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.3);
+      } else {
+        // Low harsh buzz - Sawtooth is already quite loud
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(150, ctx.currentTime);
+        osc.frequency.linearRampToValueAtTime(100, ctx.currentTime + 0.4);
+        
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.6, ctx.currentTime + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+        
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.5);
+      }
+
+      // Close context after sound finishes to free resources
+      setTimeout(() => ctx.close(), 1000);
+    } catch (e) {
+      console.error("Audio error:", e);
+    }
+  };
+
   // Persistence & History
   useEffect(() => {
     if (selectedEventId) {
@@ -321,21 +378,25 @@ function AppContent() {
     const now = Date.now();
     if (lastScannedRef.current && 
         lastScannedRef.current.code === qrCode && 
-        now - lastScannedRef.current.time < 5000) {
+        now - lastScannedRef.current.time < 4000) {
       return;
     }
+
+    // Actualizar el ref inmediatamente para bloquear escaneos duplicados instantáneos
+    lastScannedRef.current = { code: qrCode, time: now };
 
     const currentAttendees = attendeesRef.current;
     const attendee = currentAttendees.find(a => a['Código QR'] === qrCode);
     
     if (!attendee) {
       setLastScanResult({ success: false, message: 'Código no encontrado' });
+      playSound('error');
       return;
     }
 
     if (attendee.validated) {
       setLastScanResult({ success: false, message: 'Entrada ya validada', attendee });
-      lastScannedRef.current = { code: qrCode, time: now };
+      playSound('error');
       return;
     }
 
@@ -351,7 +412,7 @@ function AppContent() {
         message: 'Entrada validada correctamente',
         attendee: { ...attendee, validated: true }
       });
-      lastScannedRef.current = { code: qrCode, time: now };
+      playSound('success');
 
       setTimeout(() => {
         setLastScanResult(prev => {
@@ -360,6 +421,8 @@ function AppContent() {
         });
       }, 3000);
     } catch (error) {
+      // Si falla, permitimos reintentar borrando el último escaneo
+      lastScannedRef.current = null;
       handleFirestoreError(error, OperationType.UPDATE, `events/${selectedEvent!.id}/attendees/${qrCode}`);
     }
   };
@@ -421,7 +484,7 @@ function AppContent() {
           
           const config = { 
             fps: 20, 
-            qrbox: { width: 250, height: 250 },
+            qrbox: { width: 280, height: 280 },
             aspectRatio: 1.0,
             showTorchButtonIfSupported: true
           };
@@ -475,12 +538,24 @@ function AppContent() {
       isMounted = false;
       if (scanner) {
         const s = scanner;
-        if (s.isScanning) {
-          s.stop().catch(() => {}).finally(() => {
-            s.clear().catch(() => {});
-          });
-        } else {
-          s.clear().catch(() => {});
+        try {
+          if (s.isScanning) {
+            const stopPromise = s.stop();
+            if (stopPromise && typeof stopPromise.catch === 'function') {
+              stopPromise.catch(() => {}).finally(() => {
+                if (s.clear && typeof s.clear === 'function') {
+                  s.clear().catch(() => {});
+                }
+              });
+            }
+          } else if (s.clear && typeof s.clear === 'function') {
+            const clearPromise = s.clear();
+            if (clearPromise && typeof clearPromise.catch === 'function') {
+              clearPromise.catch(() => {});
+            }
+          }
+        } catch (e) {
+          console.warn("Scanner cleanup error:", e);
         }
       }
       html5QrCodeRef.current = null;
@@ -875,7 +950,7 @@ function AppContent() {
               exit={{ opacity: 0, x: 20 }}
               className="flex flex-col gap-3 h-full max-h-full"
             >
-              <div className="relative bg-black rounded-2xl overflow-hidden aspect-square max-w-[280px] w-full mx-auto shadow-2xl border-2 border-white shrink-0">
+              <div className="relative bg-black rounded-2xl overflow-hidden aspect-square max-w-[320px] w-full mx-auto shadow-2xl border-2 border-white shrink-0">
                 <div id="reader" key={`reader-${scannerRetry}`} className="w-full h-full"></div>
                 {!isScannerActive && !cameraError && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-900 text-white p-6 text-center">
@@ -934,10 +1009,10 @@ function AppContent() {
                       )}>
                         {lastScanResult.success ? <CheckCircle2 className="w-6 h-6" /> : <XCircle className="w-6 h-6" />}
                       </div>
-                      <div className="flex-1 overflow-hidden">
+                      <div className="flex-1 min-w-0">
                         <h3 className="font-bold text-base truncate">{lastScanResult.message}</h3>
                         {lastScanResult.attendee && (
-                          <p className="text-xs opacity-90 font-medium truncate">
+                          <p className="text-sm opacity-90 font-bold truncate">
                             {lastScanResult.attendee.Nombre} {lastScanResult.attendee.Apellidos}
                           </p>
                         )}
