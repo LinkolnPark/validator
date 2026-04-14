@@ -410,12 +410,8 @@ function AppContent() {
     }
 
     try {
-      const attendeeRef = doc(db, 'events', selectedEvent!.id, 'attendees', qrCode.replace(/\//g, '_'));
-      await updateDoc(attendeeRef, {
-        validated: true,
-        validationTime: new Date().toLocaleTimeString()
-      });
-      
+      // ACTUALIZACIÓN OPTIMISTA: Mostramos el éxito inmediatamente
+      // Esto permite que el sonido y el mensaje aparezcan aunque estemos offline
       setLastScanResult({
         success: true,
         message: 'Entrada validada correctamente',
@@ -423,6 +419,16 @@ function AppContent() {
       });
       playSound('success');
 
+      const attendeeRef = doc(db, 'events', selectedEvent!.id, 'attendees', qrCode.replace(/\//g, '_'));
+      
+      // La promesa de updateDoc se resolverá localmente de inmediato gracias a la persistencia offline,
+      // pero el "await" podría esperar a la confirmación del servidor si no se maneja bien.
+      // En Firestore con persistencia, updateDoc devuelve éxito local casi instantáneo.
+      await updateDoc(attendeeRef, {
+        validated: true,
+        validationTime: new Date().toLocaleTimeString()
+      });
+      
       setTimeout(() => {
         setLastScanResult(prev => {
           if (prev?.attendee?.['Código QR'] === qrCode) return null;
