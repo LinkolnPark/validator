@@ -62,6 +62,7 @@ function AppContent() {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [showSetPasswordModal, setShowSetPasswordModal] = useState(false);
   const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [adminUser, setAdminUser] = useState('');
   const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem('isAdmin') === 'true');
 
@@ -262,7 +263,6 @@ function AppContent() {
 
   const deleteEvent = async (eventId: string) => {
     if (!isAdmin) return;
-    if (!confirm("¿Estás seguro de que quieres eliminar este evento y todos sus asistentes?")) return;
     try {
       // Delete attendees first (optional but cleaner)
       const attendeesRef = collection(db, 'events', eventId, 'attendees');
@@ -274,6 +274,7 @@ function AppContent() {
       // Delete event
       await deleteDoc(doc(db, 'events', eventId));
       if (selectedEventId === eventId) setSelectedEventId(null);
+      setShowDeleteConfirm(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `events/${eventId}`);
     }
@@ -454,11 +455,20 @@ function AppContent() {
         setIsScannerActive(false);
         
         // Wait for AnimatePresence and DOM rendering
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 1500));
         if (!isMounted) return;
 
-        const readerElement = document.getElementById("reader");
-        if (!readerElement) return;
+        let readerElement = document.getElementById("reader");
+        if (!readerElement) {
+          // One last attempt to find the element
+          await new Promise(resolve => setTimeout(resolve, 500));
+          readerElement = document.getElementById("reader");
+        }
+        
+        if (!readerElement || readerElement.clientWidth === 0) {
+          console.warn("Reader element not ready or has no width");
+          return;
+        }
 
         try {
           // Check for camera support
@@ -471,13 +481,17 @@ function AppContent() {
           // Cleanup any global state if possible
           if (html5QrCodeRef.current) {
             try {
-              if (html5QrCodeRef.current.isScanning) {
-                await html5QrCodeRef.current.stop();
+              const oldScanner = html5QrCodeRef.current;
+              if (oldScanner.isScanning) {
+                await oldScanner.stop();
               }
-              await html5QrCodeRef.current.clear();
+              if (typeof oldScanner.clear === 'function') {
+                await oldScanner.clear();
+              }
             } catch (e) {
               console.warn("Cleanup of previous scanner failed", e);
             }
+            html5QrCodeRef.current = null;
           }
 
           scanner = new Html5Qrcode("reader", { verbose: false });
@@ -501,21 +515,23 @@ function AppContent() {
             console.warn("getCameras failed, falling back to facingMode", e);
           }
 
-          await scanner.start(
-            targetCameraId, 
-            config,
-            (decodedText: string) => {
-              validateTicket(decodedText);
-            },
-            () => {}
-          );
+          if (isMounted) {
+            await scanner.start(
+              targetCameraId, 
+              config,
+              (decodedText: string) => {
+                validateTicket(decodedText);
+              },
+              () => {}
+            );
+          }
           
           if (isMounted) {
             html5QrCodeRef.current = scanner;
             setIsScannerActive(true);
           } else {
-            await scanner.stop();
-            await scanner.clear();
+            if (scanner.isScanning) await scanner.stop();
+            if (typeof scanner.clear === 'function') await scanner.clear();
           }
         } catch (err: any) {
           console.error("Scanner start error:", err);
@@ -538,25 +554,22 @@ function AppContent() {
       isMounted = false;
       if (scanner) {
         const s = scanner;
-        try {
-          if (s.isScanning) {
-            const stopPromise = s.stop();
-            if (stopPromise && typeof stopPromise.catch === 'function') {
-              stopPromise.catch(() => {}).finally(() => {
-                if (s.clear && typeof s.clear === 'function') {
-                  s.clear().catch(() => {});
-                }
-              });
+        const cleanup = async () => {
+          try {
+            if (s.isScanning) {
+              await s.stop();
             }
-          } else if (s.clear && typeof s.clear === 'function') {
-            const clearPromise = s.clear();
-            if (clearPromise && typeof clearPromise.catch === 'function') {
-              clearPromise.catch(() => {});
+            if (typeof s.clear === 'function') {
+              // Only clear if the element still exists in DOM to avoid removeChild errors
+              if (document.getElementById("reader")) {
+                await s.clear();
+              }
             }
+          } catch (e) {
+            // Ignore cleanup errors as they are usually DOM-related during unmount
           }
-        } catch (e) {
-          console.warn("Scanner cleanup error:", e);
-        }
+        };
+        cleanup();
       }
       html5QrCodeRef.current = null;
     };
@@ -590,6 +603,46 @@ function AppContent() {
 
   const modalsUI = (
     <AnimatePresence>
+      {showDeleteConfirm && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4"
+          onClick={() => setShowDeleteConfirm(null)}
+        >
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.9, opacity: 0, y: 20 }}
+            className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center text-red-600 mx-auto mb-6">
+              <Trash2 className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-bold text-neutral-900 text-center mb-2">¿Eliminar evento?</h3>
+            <p className="text-neutral-500 text-center mb-8 text-sm">
+              Esta acción eliminará permanentemente el evento y todos sus asistentes. No se puede deshacer.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setShowDeleteConfirm(null)}
+                className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 font-bold py-4 rounded-2xl transition-all"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={() => deleteEvent(showDeleteConfirm)}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-red-100"
+              >
+                Eliminar
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+
       {(showCreateModal || showPasswordModal || showSetPasswordModal || showAdminLoginModal) && (
         <motion.div 
           initial={{ opacity: 0 }}
@@ -764,6 +817,7 @@ function AppContent() {
                       setModalError(null);
                     } else {
                       setSelectedEventId(event.id);
+                      setActiveTab('scan');
                     }
                   }}
                   role="button"
@@ -776,6 +830,7 @@ function AppContent() {
                         setModalError(null);
                       } else {
                         setSelectedEventId(event.id);
+                        setActiveTab('scan');
                       }
                     }
                   }}
@@ -793,7 +848,7 @@ function AppContent() {
                         <button 
                           onClick={(e) => {
                             e.stopPropagation();
-                            deleteEvent(event.id);
+                            setShowDeleteConfirm(event.id);
                           }}
                           className="p-2 text-neutral-300 hover:text-red-500 transition-colors"
                         >
