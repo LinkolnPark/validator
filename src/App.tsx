@@ -196,18 +196,26 @@ function AppContent() {
 
   // Attendees Listener
   useEffect(() => {
-    if (!selectedEvent) {
+    if (!selectedEventId) {
       setAttendees([]);
       return;
     }
+
+    // Find the current event to check password
+    const currentEvent = events.find(e => e.id === selectedEventId);
+    if (!currentEvent) return;
 
     // If event has a password and it's not unlocked, don't load attendees
-    if (selectedEvent.password && !unlockedEvents[selectedEvent.id]) {
+    if (currentEvent.password && !unlockedEvents[selectedEventId]) {
       setAttendees([]);
       return;
     }
 
-    const q = collection(db, 'events', selectedEvent.id, 'attendees');
+    const q = collection(db, 'events', selectedEventId, 'attendees');
+    
+    // Optimization: This listener only runs when the selected event or its unlock status changes.
+    // Firestore's onSnapshot is smart: after the first load (which costs N reads), 
+    // it only consumes 1 read per change, and switching tabs doesn't trigger a reload.
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const attendeesData = snapshot.docs.map(doc => ({
         id: doc.id,
@@ -217,11 +225,11 @@ function AppContent() {
       attendeesRef.current = attendeesData;
       setLastSyncTime(new Date());
     }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `events/${selectedEvent.id}/attendees`);
+      handleFirestoreError(error, OperationType.LIST, `events/${selectedEventId}/attendees`);
     });
 
     return () => unsubscribe();
-  }, [selectedEvent, unlockedEvents]);
+  }, [selectedEventId, unlockedEvents[selectedEventId], !!events.find(e => e.id === selectedEventId)]);
 
   const createEvent = async (name: string) => {
     if (!isAdmin) return;
