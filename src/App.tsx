@@ -43,6 +43,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 function AppContent() {
   const [events, setEvents] = useState<Event[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(() => localStorage.getItem('selectedEventId'));
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [unlockedEvents, setUnlockedEvents] = useState<Record<string, string>>(() => {
     const saved = localStorage.getItem('unlockedEvents');
     return saved ? JSON.parse(saved) : {};
@@ -320,6 +321,7 @@ function AppContent() {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      encoding: "UTF-8",
       complete: async (results) => {
         const data = results.data as any[];
         
@@ -336,12 +338,16 @@ function AppContent() {
         }
 
         try {
-          const batch = writeBatch(db);
+          let batch = writeBatch(db);
+          let currentBatchSize = 0;
           const attendeesCol = collection(db, 'events', selectedEvent.id, 'attendees');
           
-          // Process in chunks of 500 (Firestore batch limit)
           for (let i = 0; i < data.length; i++) {
             const row = data[i];
+            const qrCode = (row['Código QR'] || '').toString().trim();
+            
+            if (!qrCode) continue;
+
             const attendeeData: Attendee = {
               Nombre: row.Nombre || '',
               Apellidos: row.Apellidos || '',
@@ -355,22 +361,29 @@ function AppContent() {
               'Descuento aplicado': row['Descuento aplicado'] || '',
               'Precio pagado': row['Precio pagado'] || '',
               'Ticket ID': row['Ticket ID'] || '',
-              'Código QR': row['Código QR'] || '',
+              'Código QR': qrCode,
               'Pregunta en Checkout': row['Pregunta en Checkout'] || '',
               'Respuesta en Checkout': row['Respuesta en Checkout'] || '',
               validated: false,
             };
             
-            // Use QR code as ID to prevent duplicates
-            const docRef = doc(attendeesCol, attendeeData['Código QR'].replace(/\//g, '_'));
+            const safeId = qrCode.replace(/[\/\.\#\$\/\[\]]/g, '_');
+            const docRef = doc(attendeesCol, safeId);
             batch.set(docRef, attendeeData);
+            currentBatchSize++;
 
-            if ((i + 1) % 500 === 0 || i === data.length - 1) {
-              await batch.commit();
+            if (currentBatchSize >= 500 || i === data.length - 1) {
+              if (currentBatchSize > 0) {
+                await batch.commit();
+                batch = writeBatch(db);
+                currentBatchSize = 0;
+              }
             }
           }
+          
           setIsUploading(false);
           setLastScanResult(null);
+          alert(`¡Éxito! Se han procesado ${data.length} filas del archivo correctamente.`);
         } catch (error) {
           handleFirestoreError(error, OperationType.WRITE, `events/${selectedEvent.id}/attendees`);
           setIsUploading(false);
@@ -925,24 +938,27 @@ function AppContent() {
               </div>
             )}
 
-            <label className="block">
-              <div className="relative group cursor-pointer">
-                <input 
-                  type="file" 
-                  accept=".csv" 
-                  onChange={handleFileUpload}
-                  disabled={isUploading}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                />
-                <div className={cn(
-                  "flex items-center justify-center gap-2 text-white font-semibold py-4 px-6 rounded-2xl transition-all shadow-lg group-active:scale-95",
-                  isUploading ? "bg-neutral-400" : "bg-blue-600 hover:bg-blue-700 shadow-blue-200"
-                )}>
-                  {isUploading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
-                  <span>{isUploading ? 'Subiendo...' : 'Cargar Listado CSV'}</span>
-                </div>
-              </div>
-            </label>
+            <div className="relative group">
+              <input 
+                ref={fileInputRef}
+                type="file" 
+                accept=".csv, text/csv, application/csv, text/x-csv, application/x-csv, text/comma-separated-values, application/vnd.ms-excel" 
+                onChange={handleFileUpload}
+                disabled={isUploading}
+                className="hidden"
+              />
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading}
+                className={cn(
+                  "w-full flex items-center justify-center gap-2 text-white font-semibold py-4 px-6 rounded-2xl transition-all shadow-lg active:scale-95",
+                  isUploading ? "bg-neutral-400 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-700 shadow-blue-200 cursor-pointer"
+                )}
+              >
+                {isUploading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
+                <span>{isUploading ? 'Subiendo...' : 'Cargar Listado CSV'}</span>
+              </button>
+            </div>
           </motion.div>
         </div>
         {modalsUI}
