@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, ChangeEvent } from 'react';
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import { 
   QrCode, 
   Users, 
@@ -74,11 +75,21 @@ function AppContent() {
     success: boolean;
     message: string;
     attendee?: Attendee;
+    isNew?: boolean;
+    timestamp?: string;
   } | null>(null);
+  const [scanHistory, setScanHistory] = useState<Array<{
+    id: string;
+    success: boolean;
+    message: string;
+    attendee?: Attendee;
+    timestamp: string;
+  }>>([]);
   const [isScannerActive, setIsScannerActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [scannerRetry, setScannerRetry] = useState(0);
   const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
   const html5QrCodeRef = useRef<any>(null);
@@ -271,14 +282,23 @@ function AppContent() {
   };
 
   const deleteEvent = async (eventId: string) => {
-    if (!isAdmin) return;
+    if (!isAdmin || isDeleting) return;
+    setIsDeleting(true);
     try {
-      // Delete attendees first (optional but cleaner)
+      // Delete attendees first in chunks of 500
       const attendeesRef = collection(db, 'events', eventId, 'attendees');
       const snapshot = await getDocs(attendeesRef);
-      const batch = writeBatch(db);
-      snapshot.docs.forEach(doc => batch.delete(doc.ref));
-      await batch.commit();
+      
+      const chunks = [];
+      for (let i = 0; i < snapshot.docs.length; i += 500) {
+        chunks.push(snapshot.docs.slice(i, i + 500));
+      }
+
+      for (const chunk of chunks) {
+        const batch = writeBatch(db);
+        chunk.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
+      }
       
       // Delete event
       await deleteDoc(doc(db, 'events', eventId));
@@ -286,6 +306,8 @@ function AppContent() {
       setShowDeleteConfirm(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `events/${eventId}`);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -318,82 +340,111 @@ function AppContent() {
     setCsvError(null);
     setIsUploading(true);
 
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      encoding: "UTF-8",
-      complete: async (results) => {
-        const data = results.data as any[];
-        
-        if (data.length === 0) {
-          setCsvError('El archivo CSV está vacío.');
-          setIsUploading(false);
-          return;
-        }
+    const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
 
-        if (!data[0].hasOwnProperty('Código QR')) {
-          setCsvError('El archivo CSV no tiene la columna requerida "Código QR".');
-          setIsUploading(false);
-          return;
-        }
-
+    if (isExcel) {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
         try {
-          let batch = writeBatch(db);
-          let currentBatchSize = 0;
-          const attendeesCol = collection(db, 'events', selectedEvent.id, 'attendees');
+          const data = e.target?.result;
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet);
           
-          for (let i = 0; i < data.length; i++) {
-            const row = data[i];
-            const qrCode = (row['Código QR'] || '').toString().trim();
-            
-            if (!qrCode) continue;
-
-            const attendeeData: Attendee = {
-              Nombre: row.Nombre || '',
-              Apellidos: row.Apellidos || '',
-              'Correo electrónico': row['Correo electrónico'] || '',
-              'Fecha de compra': row['Fecha de compra'] || '',
-              'Tipo de entrada': row['Tipo de entrada'] || '',
-              'Precio original': row['Precio original'] || '',
-              'Gastos de gestion': row['Gastos de gestion'] || '',
-              'Cupon usado': row['Cupon usado'] || '',
-              'Codigo del cupon': row['Codigo del cupon'] || '',
-              'Descuento aplicado': row['Descuento aplicado'] || '',
-              'Precio pagado': row['Precio pagado'] || '',
-              'Ticket ID': row['Ticket ID'] || '',
-              'Código QR': qrCode,
-              'Pregunta en Checkout': row['Pregunta en Checkout'] || '',
-              'Respuesta en Checkout': row['Respuesta en Checkout'] || '',
-              validated: false,
-            };
-            
-            const safeId = qrCode.replace(/[\/\.\#\$\/\[\]]/g, '_');
-            const docRef = doc(attendeesCol, safeId);
-            batch.set(docRef, attendeeData);
-            currentBatchSize++;
-
-            if (currentBatchSize >= 500 || i === data.length - 1) {
-              if (currentBatchSize > 0) {
-                await batch.commit();
-                batch = writeBatch(db);
-                currentBatchSize = 0;
-              }
-            }
-          }
-          
-          setIsUploading(false);
-          setLastScanResult(null);
-          alert(`¡Éxito! Se han procesado ${data.length} filas del archivo correctamente.`);
+          await handleParsedData(jsonData as any[]);
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `events/${selectedEvent.id}/attendees`);
+          setCsvError('Error al procesar el archivo Excel: ' + (error instanceof Error ? error.message : String(error)));
           setIsUploading(false);
         }
-      },
-      error: (error) => {
-        setCsvError('Error al procesar el archivo CSV: ' + error.message);
+      };
+      reader.onerror = () => {
+        setCsvError('Error al leer el archivo.');
         setIsUploading(false);
+      };
+      reader.readAsBinaryString(file);
+    } else {
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        encoding: "UTF-8",
+        complete: async (results) => {
+          await handleParsedData(results.data as any[]);
+        },
+        error: (error) => {
+          setCsvError('Error al procesar el archivo CSV: ' + error.message);
+          setIsUploading(false);
+        }
+      });
+    }
+  };
+
+  const handleParsedData = async (data: any[]) => {
+    if (!selectedEvent) return;
+    
+    if (data.length === 0) {
+      setCsvError('El archivo está vacío.');
+      setIsUploading(false);
+      return;
+    }
+
+    if (!data[0].hasOwnProperty('Código QR')) {
+      setCsvError('El archivo no tiene la columna requerida "Código QR".');
+      setIsUploading(false);
+      return;
+    }
+
+    try {
+      let batch = writeBatch(db);
+      let currentBatchSize = 0;
+      const attendeesCol = collection(db, 'events', selectedEvent.id, 'attendees');
+      
+      for (let i = 0; i < data.length; i++) {
+        const row = data[i];
+        const qrCode = (row['Código QR'] || '').toString().trim();
+        
+        if (!qrCode) continue;
+
+        const attendeeData: Attendee = {
+          Nombre: row.Nombre || '',
+          Apellidos: row.Apellidos || '',
+          'Correo electrónico': row['Correo electrónico'] || '',
+          'Fecha de compra': row['Fecha de compra'] || '',
+          'Tipo de entrada': row['Tipo de entrada'] || '',
+          'Precio original': row['Precio original'] || '',
+          'Gastos de gestion': row['Gastos de gestion'] || '',
+          'Cupon usado': row['Cupon usado'] || '',
+          'Codigo del cupon': row['Codigo del cupon'] || '',
+          'Descuento aplicado': row['Descuento aplicado'] || '',
+          'Precio pagado': row['Precio pagado'] || '',
+          'Ticket ID': row['Ticket ID'] || '',
+          'Código QR': qrCode,
+          'Pregunta en Checkout': row['Pregunta en Checkout'] || '',
+          'Respuesta en Checkout': row['Respuesta en Checkout'] || '',
+          validated: false,
+        };
+        
+        const safeId = qrCode.replace(/[\/\.\#\$\/\[\]]/g, '_');
+        const docRef = doc(attendeesCol, safeId);
+        batch.set(docRef, attendeeData);
+        currentBatchSize++;
+
+        if (currentBatchSize >= 500 || i === data.length - 1) {
+          if (currentBatchSize > 0) {
+            await batch.commit();
+            batch = writeBatch(db);
+            currentBatchSize = 0;
+          }
+        }
       }
-    });
+      
+      setIsUploading(false);
+      setLastScanResult(null);
+      alert(`¡Éxito! Se han procesado ${data.length} filas del archivo correctamente.`);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `events/${selectedEvent.id}/attendees`);
+      setIsUploading(false);
+    }
   };
 
   const validateTicket = async (qrCode: string) => {
@@ -410,58 +461,98 @@ function AppContent() {
     const currentAttendees = attendeesRef.current;
     const attendee = currentAttendees.find(a => a['Código QR'] === qrCode);
     
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    
     if (!attendee) {
-      setLastScanResult({ success: false, message: 'Código no encontrado' });
+      const result = { 
+        success: false, 
+        message: 'Código no encontrado',
+        isNew: true,
+        timestamp,
+        qrCode
+      };
+      setLastScanResult(result);
       playSound('error');
+      
+      setTimeout(() => {
+        setLastScanResult(prev => (prev?.isNew && prev.message === 'Código no encontrado' ? { ...prev, isNew: false } : prev));
+        setScanHistory(prev => [{ id: crypto.randomUUID(), ...result, isNew: false }, ...prev].slice(0, 100));
+      }, 500);
       return;
     }
 
     if (attendee.validated) {
-      setLastScanResult({ success: false, message: 'Entrada ya validada', attendee });
+      const result = { 
+        success: false, 
+        message: 'Ya validada', 
+        attendee,
+        isNew: true,
+        timestamp,
+        qrCode
+      };
+      setLastScanResult(result);
       playSound('error');
+      
+      setTimeout(() => {
+        setLastScanResult(prev => (prev?.isNew && prev.attendee?.['Código QR'] === qrCode ? { ...prev, isNew: false } : prev));
+        setScanHistory(prev => [{ id: crypto.randomUUID(), ...result, isNew: false }, ...prev].slice(0, 100));
+      }, 500);
       return;
     }
 
     try {
-      // ACTUALIZACIÓN OPTIMISTA: Mostramos el éxito inmediatamente
-      // Esto permite que el sonido y el mensaje aparezcan aunque estemos offline
-      setLastScanResult({
+      // ACTUALIZACIÓN OPTIMISTA
+      const result = {
         success: true,
-        message: 'Entrada validada correctamente',
-        attendee: { ...attendee, validated: true }
-      });
+        message: 'Validada',
+        attendee: { ...attendee, validated: true },
+        isNew: true,
+        timestamp,
+        qrCode
+      };
+      setLastScanResult(result);
       playSound('success');
 
-      const attendeeRef = doc(db, 'events', selectedEvent!.id, 'attendees', qrCode.replace(/\//g, '_'));
-      
-      // La promesa de updateDoc se resolverá localmente de inmediato gracias a la persistencia offline,
-      // pero el "await" podría esperar a la confirmación del servidor si no se maneja bien.
-      // En Firestore con persistencia, updateDoc devuelve éxito local casi instantáneo.
-      await updateDoc(attendeeRef, {
-        validated: true,
-        validationTime: new Date().toLocaleTimeString()
-      });
-      
+      // Pasar de central a inferior después de 0.5s
       setTimeout(() => {
         setLastScanResult(prev => {
-          if (prev?.attendee?.['Código QR'] === qrCode) return null;
+          if (prev?.isNew) {
+            return { ...prev, isNew: false };
+          }
           return prev;
         });
-      }, 3000);
+        setScanHistory(prev => [{ id: crypto.randomUUID(), ...result, isNew: false }, ...prev].slice(0, 100));
+      }, 500);
+
+      // Limpiar central después de 5s
+      setTimeout(() => {
+        setLastScanResult(prev => {
+          if (prev && !prev.isNew) return null;
+          return prev;
+        });
+      }, 5000);
+
+      if (selectedEvent) {
+        const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', qrCode.replace(/\//g, '_'));
+        await updateDoc(attendeeRef, {
+          validated: true,
+          validationTime: timestamp
+        });
+      }
     } catch (error) {
-      // Si falla, permitimos reintentar borrando el último escaneo
       lastScannedRef.current = null;
-      handleFirestoreError(error, OperationType.UPDATE, `events/${selectedEvent!.id}/attendees/${qrCode}`);
+      handleFirestoreError(error, OperationType.UPDATE, `events/${selectedEvent?.id}/attendees/${qrCode}`);
     }
   };
 
   const toggleManualValidation = async (attendee: Attendee) => {
     if (!selectedEvent) return;
     try {
+      const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', attendee['Código QR'].replace(/\//g, '_'));
       await updateDoc(attendeeRef, {
         validated: !attendee.validated,
-        validationTime: !attendee.validated ? new Date().toLocaleTimeString() : null
+        validationTime: !attendee.validated ? timestamp : null
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `events/${selectedEvent.id}/attendees/${attendee['Código QR']}`);
@@ -655,15 +746,24 @@ function AppContent() {
             <div className="flex gap-3">
               <button 
                 onClick={() => setShowDeleteConfirm(null)}
-                className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 font-bold py-4 rounded-2xl transition-all"
+                disabled={isDeleting}
+                className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 font-bold py-4 rounded-2xl transition-all disabled:opacity-50"
               >
                 Cancelar
               </button>
               <button 
                 onClick={() => deleteEvent(showDeleteConfirm)}
-                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-red-100"
+                disabled={isDeleting}
+                className="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-red-100 disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                Eliminar
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                    <span>Eliminando...</span>
+                  </>
+                ) : (
+                  <span>Eliminar</span>
+                )}
               </button>
             </div>
           </motion.div>
@@ -929,7 +1029,7 @@ function AppContent() {
               </div>
             </div>
             <h2 className="text-2xl font-bold text-neutral-900 mb-2">Cargar Asistentes</h2>
-            <p className="text-neutral-500 mb-8">Sube el CSV para {selectedEvent.name} para empezar la validación sincronizada.</p>
+            <p className="text-neutral-500 mb-8">Sube el listado de asistentes (CSV o Excel) para {selectedEvent.name} para empezar la validación sincronizada.</p>
             
             {csvError && (
               <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-start gap-3 text-left">
@@ -942,7 +1042,7 @@ function AppContent() {
               <input 
                 ref={fileInputRef}
                 type="file" 
-                accept=".csv, text/csv, application/csv, text/x-csv, application/x-csv, text/comma-separated-values, application/vnd.ms-excel" 
+                accept=".csv, .xlsx, .xls, text/csv, application/csv, text/x-csv, application/x-csv, text/comma-separated-values, application/vnd.ms-excel, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" 
                 onChange={handleFileUpload}
                 disabled={isUploading}
                 className="hidden"
@@ -956,7 +1056,7 @@ function AppContent() {
                 )}
               >
                 {isUploading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
-                <span>{isUploading ? 'Subiendo...' : 'Cargar Listado CSV'}</span>
+                <span>{isUploading ? 'Subiendo...' : 'Cargar Listado (CSV/Excel)'}</span>
               </button>
             </div>
           </motion.div>
@@ -978,20 +1078,20 @@ function AppContent() {
           </div>
           <h1 className="font-black text-blue-600 leading-tight tracking-tighter text-sm hidden sm:block">TICKETBOOM VALIDATOR</h1>
           <div className="flex items-center gap-2">
-            <button 
-              onClick={() => {
-                const input = document.createElement('input');
-                input.type = 'file';
-                input.accept = '.csv';
-                input.onchange = (e: any) => handleFileUpload(e);
-                input.click();
-              }}
-              className="flex items-center gap-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 px-3 py-2 rounded-xl text-xs font-bold transition-all active:scale-95"
-              title="Cargar nuevo CSV"
-            >
-              <Upload className="w-4 h-4" />
-              <span>Actualizar CSV</span>
-            </button>
+              <button 
+                onClick={() => {
+                  const input = document.createElement('input');
+                  input.type = 'file';
+                  input.accept = '.csv, .xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel';
+                  input.onchange = (e: any) => handleFileUpload(e);
+                  input.click();
+                }}
+                className="flex items-center gap-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 px-3 py-2 rounded-xl text-xs font-bold transition-all active:scale-95"
+                title="Actualizar listado (CSV/Excel)"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Reemplazar Excel/CSV</span>
+              </button>
           </div>
         </div>
       </header>
@@ -1028,15 +1128,55 @@ function AppContent() {
       <main className="flex-1 max-w-4xl w-full mx-auto p-3 md:p-6 overflow-hidden">
         <AnimatePresence mode="wait">
           {activeTab === 'scan' ? (
-            <motion.div 
+            <div 
               key="scan"
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 20 }}
-              className="flex flex-col gap-3 h-full max-h-full"
+              className="flex flex-col gap-3 h-full max-h-full animate-in fade-in slide-in-from-left-4 duration-300"
             >
-              <div className="relative bg-black rounded-2xl overflow-hidden aspect-square max-w-[320px] w-full mx-auto shadow-2xl border-2 border-white shrink-0">
+              <div className="relative bg-black rounded-2xl overflow-hidden aspect-square max-w-[280px] w-full mx-auto shadow-2xl border-2 border-white shrink-0">
                 <div id="reader" key={`reader-${scannerRetry}`} className="w-full h-full"></div>
+                
+                {/* Scanning Frame Overlay */}
+                <div className="absolute inset-0 border-[30px] border-black/40 pointer-events-none">
+                  <div className="w-full h-full border-2 border-white/20 rounded-2xl relative">
+                    <div className="absolute -top-1 -left-1 w-6 h-6 border-t-4 border-l-4 border-white rounded-tl-md"></div>
+                    <div className="absolute -top-1 -right-1 w-6 h-6 border-t-4 border-r-4 border-white rounded-tr-md"></div>
+                    <div className="absolute -bottom-1 -left-1 w-6 h-6 border-b-4 border-l-4 border-white rounded-bl-md"></div>
+                    <div className="absolute -bottom-1 -right-1 w-6 h-6 border-b-4 border-r-4 border-white rounded-br-md"></div>
+                  </div>
+                </div>
+
+                {/* Central Overlay for new scans */}
+                {lastScanResult?.isNew && (
+                  <div className="absolute inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px] pointer-events-none">
+                    <div className={cn(
+                      "w-full max-w-[240px] rounded-3xl p-5 shadow-2xl border-4 flex flex-col items-center gap-3 text-center",
+                      lastScanResult.success 
+                        ? "bg-green-500 border-green-400 text-white" 
+                        : "bg-red-500 border-red-400 text-white"
+                    )}>
+                      <div className="w-16 h-16 rounded-full bg-white/20 flex items-center justify-center mb-1">
+                        {lastScanResult.success 
+                          ? <CheckCircle2 className="w-10 h-10 text-white" /> 
+                          : <XCircle className="w-10 h-10 text-white" />
+                        }
+                      </div>
+                      <div>
+                        <h2 className="text-lg font-black mb-1 leading-tight uppercase text-white">{lastScanResult.message}</h2>
+                        {lastScanResult.attendee && (
+                          <div className="bg-black/20 px-3 py-1.5 rounded-xl mt-1">
+                            <p className="text-base font-bold truncate max-w-[180px] text-white">
+                              {lastScanResult.attendee.Nombre}
+                            </p>
+                            <p className="text-xs opacity-90 truncate max-w-[180px] text-white">
+                              {lastScanResult.attendee.Apellidos}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {!isScannerActive && !cameraError && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-900 text-white p-6 text-center">
                     <RefreshCw className="w-8 h-8 animate-spin mb-4 text-blue-500" />
@@ -1072,52 +1212,59 @@ function AppContent() {
                 )}
               </div>
 
-              {/* Scan Result Area */}
-              <div className="flex-1 flex items-center justify-center min-h-[100px]">
-                <AnimatePresence mode="wait">
-                  {lastScanResult ? (
-                    <motion.div 
-                      key="result"
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.9 }}
+              {/* Scan Result History */}
+              <div className="flex-1 min-h-0 flex flex-col mt-2 border-t border-neutral-200 pt-2 overflow-hidden">
+                <div className="flex-1 overflow-y-auto px-1 space-y-1.5 scrollbar-hide pb-4">
+                  {scanHistory.map((scan, index) => (
+                    <div 
+                      key={scan.id}
                       className={cn(
-                        "w-full rounded-2xl p-4 shadow-lg border-2 flex items-center gap-3",
-                        lastScanResult.success 
-                          ? "bg-green-50 border-green-200 text-green-800" 
-                          : "bg-red-50 border-red-200 text-red-800"
+                        "w-full rounded-lg px-2 py-1 shadow-sm border flex items-center gap-2",
+                        scan.success 
+                          ? "bg-green-50 border-green-100 text-green-900" 
+                          : "bg-red-50 border-red-100 text-red-900",
+                        index === 0 && lastScanResult && !lastScanResult.isNew ? "border-2 border-blue-500 ring-2 ring-blue-500/10" : "opacity-90"
                       )}
                     >
                       <div className={cn(
-                        "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
-                        lastScanResult.success ? "bg-green-200" : "bg-red-200"
+                        "w-5 h-5 rounded-full flex items-center justify-center shrink-0",
+                        scan.success ? "bg-green-200" : "bg-red-200"
                       )}>
-                        {lastScanResult.success ? <CheckCircle2 className="w-6 h-6" /> : <XCircle className="w-6 h-6" />}
+                        {scan.success ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-bold text-base truncate">{lastScanResult.message}</h3>
-                        {lastScanResult.attendee && (
-                          <p className="text-sm opacity-90 font-bold truncate">
-                            {lastScanResult.attendee.Nombre} {lastScanResult.attendee.Apellidos}
-                          </p>
+                        <div className="flex justify-between items-center h-4">
+                          <h3 className="font-black text-[9px] uppercase tracking-wider truncate">
+                            {scan.message}
+                          </h3>
+                          <span className="text-[8px] opacity-40 font-mono font-bold bg-black/5 px-1 rounded">
+                            {scan.timestamp}
+                          </span>
+                        </div>
+                        {scan.attendee && (
+                          <div className="flex justify-between items-center gap-2">
+                            <p className="text-[10px] font-bold truncate opacity-80 leading-none">
+                              {scan.attendee.Nombre} {scan.attendee.Apellidos}
+                            </p>
+                            <span className="text-[8px] opacity-30 font-mono shrink-0">#{scan.qrCode}</span>
+                          </div>
+                        )}
+                        {!scan.attendee && scan.qrCode && (
+                          <p className="text-[8px] opacity-30 font-mono truncate">ID: {scan.qrCode}</p>
                         )}
                       </div>
-                    </motion.div>
-                  ) : (
-                    <motion.div
-                      key="placeholder"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      className="text-center text-neutral-400"
-                    >
-                      <QrCode className="w-8 h-8 mx-auto mb-2 opacity-20" />
-                      <p className="text-xs font-medium">Esperando escaneo...</p>
-                    </motion.div>
+                    </div>
+                  ))}
+
+                  {scanHistory.length === 0 && !lastScanResult?.isNew && (
+                    <div className="h-full flex flex-col items-center justify-center text-neutral-400 py-8">
+                      <QrCode className="w-10 h-10 opacity-10 mb-1" />
+                      <p className="text-[10px] font-bold uppercase tracking-widest opacity-30">Sin Validaciones</p>
+                    </div>
                   )}
-                </AnimatePresence>
+                </div>
               </div>
-            </motion.div>
+            </div>
           ) : (
             <motion.div 
               key="list"
@@ -1153,11 +1300,14 @@ function AppContent() {
                           {attendee.Nombre} {attendee.Apellidos}
                         </h3>
                         <div className="flex items-center gap-2 mt-1">
-                          <p className="text-xs text-neutral-500 truncate">{attendee['Tipo de entrada']}</p>
+                          <p className="text-[10px] text-neutral-500 truncate font-medium">{attendee['Tipo de entrada']}</p>
                           {attendee.validated && (
-                            <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-bold uppercase">
-                              {attendee.validationTime}
-                            </span>
+                            <div className="flex items-center gap-1.5 bg-green-100/50 text-green-700 px-2 py-0.5 rounded-full">
+                              <Check className="w-2.5 h-2.5" />
+                              <span className="text-[9px] font-black uppercase tracking-tight">
+                                {attendee.validationTime || 'Validado'}
+                              </span>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1188,34 +1338,34 @@ function AppContent() {
       </main>
 
       {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 px-6 py-4 z-40 shadow-[0_-4px_20px_rgba(0,0,0,0.05)]">
-        <div className="max-w-md mx-auto flex items-center justify-around gap-4">
+      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 px-6 py-2 z-40 shadow-[0_-4px_20px_rgba(0,0,0,0.05)]">
+        <div className="max-w-md mx-auto flex items-center justify-around gap-2">
           <button 
             onClick={() => setActiveTab('scan')}
             className={cn(
-              "flex flex-col items-center gap-1 flex-1 py-2 rounded-2xl transition-all",
+              "flex flex-col items-center gap-0.5 flex-1 py-1 rounded-xl transition-all",
               activeTab === 'scan' ? "text-blue-600 bg-blue-50" : "text-neutral-400 hover:text-neutral-600"
             )}
           >
-            <QrCode className="w-6 h-6" />
-            <span className="text-[10px] font-bold uppercase tracking-wider">Escanear</span>
+            <QrCode className="w-5 h-5" />
+            <span className="text-[9px] font-black uppercase tracking-wider">Escanear</span>
           </button>
           <button 
             onClick={() => setActiveTab('list')}
             className={cn(
-              "flex flex-col items-center gap-1 flex-1 py-2 rounded-2xl transition-all",
+              "flex flex-col items-center gap-0.5 flex-1 py-1 rounded-xl transition-all",
               activeTab === 'list' ? "text-blue-600 bg-blue-50" : "text-neutral-400 hover:text-neutral-600"
             )}
           >
-            <Users className="w-6 h-6" />
-            <span className="text-[10px] font-bold uppercase tracking-wider">Asistentes</span>
+            <Users className="w-5 h-5" />
+            <span className="text-[9px] font-black uppercase tracking-wider">Asistentes</span>
           </button>
           <button 
             onClick={() => setSelectedEventId(null)}
-            className="flex flex-col items-center gap-1 flex-1 py-2 rounded-2xl transition-all text-neutral-400 hover:text-neutral-600"
+            className="flex flex-col items-center gap-0.5 flex-1 py-1 rounded-xl transition-all text-neutral-400 hover:text-neutral-600"
           >
-            <Calendar className="w-6 h-6" />
-            <span className="text-[10px] font-bold uppercase tracking-wider">Eventos</span>
+            <Calendar className="w-5 h-5" />
+            <span className="text-[9px] font-black uppercase tracking-wider">Eventos</span>
           </button>
         </div>
       </nav>
