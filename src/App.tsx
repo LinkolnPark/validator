@@ -1128,9 +1128,12 @@ function AppContent() {
       <main className="flex-1 max-w-4xl w-full mx-auto p-3 md:p-6 overflow-hidden">
         <AnimatePresence mode="wait">
           {activeTab === 'scan' ? (
-            <div 
+            <motion.div 
               key="scan"
-              className="flex flex-col gap-3 h-full max-h-full animate-in fade-in slide-in-from-left-4 duration-300"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex flex-col gap-3 h-full max-h-full"
             >
               <div className="relative bg-black rounded-2xl overflow-hidden aspect-square max-w-[280px] w-full mx-auto shadow-2xl border-2 border-white shrink-0">
                 <div id="reader" key={`reader-${scannerRetry}`} className="w-full h-full"></div>
@@ -1264,7 +1267,7 @@ function AppContent() {
                   )}
                 </div>
               </div>
-            </div>
+            </motion.div>
           ) : (
             <motion.div 
               key="list"
