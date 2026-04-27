@@ -452,7 +452,7 @@ function AppContent() {
     const now = Date.now();
     if (lastScannedRef.current && 
         lastScannedRef.current.code === qrCode && 
-        now - lastScannedRef.current.time < 4000) {
+        now - lastScannedRef.current.time < 2000) {
       return;
     }
 
@@ -695,9 +695,12 @@ function AppContent() {
   }, [activeTab, attendees.length, selectedEvent, scannerRetry]);
 
   const filteredAttendees = useMemo(() => {
+    const q = searchQuery.toLowerCase();
     return attendees.filter(a => {
       const fullName = `${a.Nombre} ${a.Apellidos}`.toLowerCase();
-      return fullName.includes(searchQuery.toLowerCase());
+      const email = (a['Correo electrónico'] || '').toLowerCase();
+      const qrId = (a['Código QR'] || '').toLowerCase();
+      return fullName.includes(q) || email.includes(q) || qrId.includes(q);
     });
   }, [attendees, searchQuery]);
 
@@ -1281,7 +1284,7 @@ function AppContent() {
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-neutral-400" />
                 <input 
                   type="text"
-                  placeholder="Buscar por nombre o apellidos..."
+                  placeholder="Buscar por nombre, email o código..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full bg-white border border-neutral-200 rounded-2xl py-3 pl-12 pr-4 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm transition-all text-sm"
@@ -1300,11 +1303,16 @@ function AppContent() {
                       )}
                     >
                       <div className="flex-1 min-w-0">
-                        <h3 className="font-bold text-neutral-900 truncate">
-                          {attendee.Nombre} {attendee.Apellidos}
-                        </h3>
-                        <div className="flex items-center gap-2 mt-1">
-                          <p className="text-[10px] text-neutral-500 truncate font-medium">{attendee['Tipo de entrada']}</p>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-bold text-neutral-900 truncate max-w-[200px]">
+                            {attendee.Nombre} {attendee.Apellidos}
+                          </h3>
+                          <span className="text-[9px] bg-neutral-100 text-neutral-500 px-1.5 py-0.5 rounded font-mono">
+                            #{attendee['Código QR']}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <p className="text-[10px] text-neutral-500 truncate max-w-[180px]">{attendee['Correo electrónico']}</p>
                           {attendee.validated && (
                             <div className="flex items-center gap-1.5 bg-green-100/50 text-green-700 px-2 py-0.5 rounded-full">
                               <Check className="w-2.5 h-2.5" />
