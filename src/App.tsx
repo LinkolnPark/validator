@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, ChangeEvent } from 'react';
 import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
+import { read, utils } from 'xlsx';
 import { 
   QrCode, 
   Users, 
@@ -347,10 +347,10 @@ function AppContent() {
       reader.onload = async (e) => {
         try {
           const data = e.target?.result;
-          const workbook = XLSX.read(data, { type: 'binary' });
+          const workbook = read(data, { type: 'binary' });
           const sheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[sheetName];
-          const jsonData = XLSX.utils.sheet_to_json(worksheet);
+          const jsonData = utils.sheet_to_json(worksheet);
           
           await handleParsedData(jsonData as any[]);
         } catch (error) {
