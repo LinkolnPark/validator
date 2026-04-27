@@ -87,10 +87,13 @@ function AppContent() {
     timestamp: string;
   }>>([]);
   const [isScannerActive, setIsScannerActive] = useState(false);
+  const [isInitializingScanner, setIsInitializingScanner] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isLoadingAttendees, setIsLoadingAttendees] = useState(false);
+  const [showReplaceConfirm, setShowReplaceConfirm] = useState(false);
   const [scannerRetry, setScannerRetry] = useState(0);
   const [lastSyncTime, setLastSyncTime] = useState<Date>(new Date());
   const html5QrCodeRef = useRef<any>(null);
@@ -211,6 +214,7 @@ function AppContent() {
   useEffect(() => {
     if (!selectedEventId) {
       setAttendees([]);
+      setIsLoadingAttendees(false);
       return;
     }
 
@@ -221,9 +225,11 @@ function AppContent() {
     // If event has a password and it's not unlocked, don't load attendees
     if (currentEvent.password && !unlockedEvents[selectedEventId]) {
       setAttendees([]);
+      setIsLoadingAttendees(false);
       return;
     }
 
+    setIsLoadingAttendees(true);
     const q = collection(db, 'events', selectedEventId, 'attendees');
     
     // Optimization: This listener only runs when the selected event or its unlock status changes.
@@ -237,8 +243,10 @@ function AppContent() {
       setAttendees(attendeesData);
       attendeesRef.current = attendeesData;
       setLastSyncTime(new Date());
+      setIsLoadingAttendees(false);
     }, (error) => {
       handleFirestoreError(error, OperationType.LIST, `events/${selectedEventId}/attendees`);
+      setIsLoadingAttendees(false);
     });
 
     return () => unsubscribe();
@@ -380,6 +388,10 @@ function AppContent() {
     }
   };
 
+  const [showUploadSuccess, setShowUploadSuccess] = useState<number | null>(null);
+
+  const getSafeId = (id: string) => id.replace(/[\/\.\#\$\/\[\]]/g, '_');
+
   const handleParsedData = async (data: any[]) => {
     if (!selectedEvent) return;
     
@@ -425,7 +437,7 @@ function AppContent() {
           validated: false,
         };
         
-        const safeId = qrCode.replace(/[\/\.\#\$\/\[\]]/g, '_');
+        const safeId = getSafeId(qrCode);
         const docRef = doc(attendeesCol, safeId);
         batch.set(docRef, attendeeData);
         currentBatchSize++;
@@ -441,7 +453,7 @@ function AppContent() {
       
       setIsUploading(false);
       setLastScanResult(null);
-      alert(`¡Éxito! Se han procesado ${data.length} filas del archivo correctamente.`);
+      setShowUploadSuccess(data.length);
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, `events/${selectedEvent.id}/attendees`);
       setIsUploading(false);
@@ -534,7 +546,7 @@ function AppContent() {
       }, 5000);
 
       if (selectedEvent) {
-        const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', qrCode.replace(/\//g, '_'));
+        const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', getSafeId(qrCode));
         await updateDoc(attendeeRef, {
           validated: true,
           validationTime: timestamp
@@ -548,9 +560,15 @@ function AppContent() {
 
   const toggleManualValidation = async (attendee: Attendee) => {
     if (!selectedEvent) return;
+    
+    // Solo permitir desmarcar si es admin
+    if (attendee.validated && !isAdmin) {
+      return;
+    }
+
     try {
       const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', attendee['Código QR'].replace(/\//g, '_'));
+      const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', getSafeId(attendee['Código QR']));
       await updateDoc(attendeeRef, {
         validated: !attendee.validated,
         validationTime: !attendee.validated ? timestamp : null
@@ -564,56 +582,67 @@ function AppContent() {
     // No longer needed as we use events
   };
 
+  const isScannerStoppingRef = useRef(false);
+
   useEffect(() => {
     let isMounted = true;
-    let scanner: any = null;
+    let currentScanner: any = null;
 
     const initScanner = async () => {
-      if (activeTab === 'scan' && attendees.length > 0 && selectedEvent) {
+      if (activeTab === 'scan' && attendees.length > 0 && selectedEvent && !isInitializingScanner && !isScannerStoppingRef.current) {
+        setIsInitializingScanner(true);
         setCameraError(null);
         setIsScannerActive(false);
         
         // Wait for AnimatePresence and DOM rendering
         await new Promise(resolve => setTimeout(resolve, 1500));
-        if (!isMounted) return;
+        
+        if (!isMounted) {
+          setIsInitializingScanner(false);
+          return;
+        }
 
         let readerElement = document.getElementById("reader");
         if (!readerElement) {
-          // One last attempt to find the element
           await new Promise(resolve => setTimeout(resolve, 500));
           readerElement = document.getElementById("reader");
         }
         
         if (!readerElement || readerElement.clientWidth === 0) {
           console.warn("Reader element not ready or has no width");
+          setIsInitializingScanner(false);
           return;
         }
 
         try {
-          // Check for camera support
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error("Tu navegador no soporta el acceso a la cámara o no estás en una conexión segura (HTTPS).");
-          }
-
-          const { Html5Qrcode } = await import('html5-qrcode');
+          const { Html5Qrcode, Html5QrcodeScannerState } = await import('html5-qrcode');
           
-          // Cleanup any global state if possible
           if (html5QrCodeRef.current) {
             try {
               const oldScanner = html5QrCodeRef.current;
-              if (oldScanner.isScanning) {
-                await oldScanner.stop();
-              }
-              if (typeof oldScanner.clear === 'function') {
-                await oldScanner.clear();
+              const readerExists = document.getElementById("reader");
+              if (readerExists) {
+                const state = oldScanner.getState();
+                if (state === Html5QrcodeScannerState.SCANNING || state === Html5QrcodeScannerState.PAUSED) {
+                  await oldScanner.stop();
+                }
+                if (readerExists.children.length > 0) {
+                  await oldScanner.clear();
+                }
               }
             } catch (e) {
-              console.warn("Cleanup of previous scanner failed", e);
+              const reader = document.getElementById("reader");
+              if (reader) reader.innerHTML = "";
             }
             html5QrCodeRef.current = null;
           }
 
-          scanner = new Html5Qrcode("reader", { verbose: false });
+          if (!isMounted) {
+            setIsInitializingScanner(false);
+            return;
+          }
+
+          currentScanner = new Html5Qrcode("reader", { verbose: false });
           
           const config = { 
             fps: 20, 
@@ -627,30 +656,41 @@ function AppContent() {
           try {
             const cameras = await Html5Qrcode.getCameras();
             if (cameras && cameras.length > 0) {
-              const back = cameras.find(c => /back|trasera|rear|environment/i.test(c.label));
+              const back = cameras.find((c: any) => /back|trasera|rear|environment/i.test(c.label));
               targetCameraId = back ? back.id : cameras[0].id;
             }
           } catch (e) {
-            console.warn("getCameras failed, falling back to facingMode", e);
+            console.warn("getCameras failed", e);
           }
 
           if (isMounted) {
-            await scanner.start(
-              targetCameraId, 
-              config,
-              (decodedText: string) => {
-                validateTicket(decodedText);
-              },
-              () => {}
-            );
-          }
-          
-          if (isMounted) {
-            html5QrCodeRef.current = scanner;
-            setIsScannerActive(true);
-          } else {
-            if (scanner.isScanning) await scanner.stop();
-            if (typeof scanner.clear === 'function') await scanner.clear();
+            try {
+              await currentScanner.start(
+                targetCameraId, 
+                config,
+                (decodedText: string) => {
+                  validateTicket(decodedText);
+                },
+                () => {}
+              );
+              
+              if (isMounted) {
+                html5QrCodeRef.current = currentScanner;
+                setIsScannerActive(true);
+              } else {
+                // If we unmounted while starting, stop immediately
+                if (currentScanner.getState() !== Html5QrcodeScannerState.NOT_STARTED) {
+                  await currentScanner.stop();
+                  await currentScanner.clear();
+                }
+              }
+            } catch (startError: any) {
+              if (startError?.message?.includes("play() request was interrupted") || startError?.message?.includes("media was removed")) {
+                console.warn("Scanner start interrupted by DOM removal");
+                return;
+              }
+              throw startError;
+            }
           }
         } catch (err: any) {
           console.error("Scanner start error:", err);
@@ -663,6 +703,10 @@ function AppContent() {
             setCameraError(msg);
             setIsScannerActive(false);
           }
+        } finally {
+          if (isMounted) {
+            setIsInitializingScanner(false);
+          }
         }
       }
     };
@@ -671,26 +715,29 @@ function AppContent() {
 
     return () => {
       isMounted = false;
-      if (scanner) {
-        const s = scanner;
-        const cleanup = async () => {
+      const cleanupScanner = async () => {
+        if (html5QrCodeRef.current) {
+          isScannerStoppingRef.current = true;
+          const s = html5QrCodeRef.current;
+          html5QrCodeRef.current = null;
           try {
-            if (s.isScanning) {
-              await s.stop();
-            }
-            if (typeof s.clear === 'function') {
-              // Only clear if the element still exists in DOM to avoid removeChild errors
-              if (document.getElementById("reader")) {
+            const state = s.getState();
+            if (state !== 1) { // 1 is Html5QrcodeScannerState.NOT_STARTED
+              try {
+                await s.stop();
+              } catch (e) {}
+              try {
                 await s.clear();
-              }
+              } catch (e) {}
             }
           } catch (e) {
-            // Ignore cleanup errors as they are usually DOM-related during unmount
+            console.warn("Cleanup error during unmount:", e);
+          } finally {
+            isScannerStoppingRef.current = false;
           }
-        };
-        cleanup();
-      }
-      html5QrCodeRef.current = null;
+        }
+      };
+      cleanupScanner();
     };
   }, [activeTab, attendees.length, selectedEvent, scannerRetry]);
 
@@ -723,8 +770,120 @@ function AppContent() {
     }
   };
 
+  const handleReplaceClick = () => {
+    setShowReplaceConfirm(true);
+  };
+
+  const triggerFileUpload = () => {
+    setShowReplaceConfirm(false);
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.csv, .xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel';
+    input.onchange = (e: any) => handleFileUpload(e);
+    input.click();
+  };
+
   const modalsUI = (
     <AnimatePresence>
+      {isUploading && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/60 backdrop-blur-md z-[120] flex items-center justify-center p-4"
+        >
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-8 text-center"
+          >
+            <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600 mx-auto mb-6">
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+              >
+                <Upload className="w-8 h-8" />
+              </motion.div>
+            </div>
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">Importando datos...</h3>
+            <p className="text-neutral-500 text-sm">
+              Estamos procesando el listado de asistentes y actualizando la base de datos. Por favor, no cierres la aplicación.
+            </p>
+          </motion.div>
+        </motion.div>
+      )}
+
+      {showUploadSuccess !== null && !isUploading && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[120] flex items-center justify-center p-4"
+        >
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.9, opacity: 0, y: 20 }}
+            className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-8 text-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-16 h-16 bg-green-50 rounded-2xl flex items-center justify-center text-green-600 mx-auto mb-6">
+              <ShieldCheck className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">¡Carga completada!</h3>
+            <p className="text-neutral-500 mb-8 text-sm">
+              Se han procesado {showUploadSuccess} asistentes correctamente para este evento.
+            </p>
+            <button 
+              onClick={() => setShowUploadSuccess(null)}
+              className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-green-100 active:scale-95"
+            >
+              Entendido
+            </button>
+          </motion.div>
+        </motion.div>
+      )}
+
+      {showReplaceConfirm && (
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[110] flex items-center justify-center p-4"
+          onClick={() => setShowReplaceConfirm(false)}
+        >
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0, y: 20 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.9, opacity: 0, y: 20 }}
+            className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-8"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-16 h-16 bg-blue-50 rounded-2xl flex items-center justify-center text-blue-600 mx-auto mb-6">
+              <Upload className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-bold text-neutral-900 text-center mb-2">¿Reemplazar archivo?</h3>
+            <p className="text-neutral-500 text-center mb-8 text-sm">
+              ¿Estás seguro que deseas reemplazar el archivo? esto borrará todo el proceso de validación actual.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setShowReplaceConfirm(false)}
+                className="flex-1 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 font-bold py-4 rounded-2xl transition-all"
+              >
+                Retroceder
+              </button>
+              <button 
+                onClick={triggerFileUpload}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-blue-100"
+              >
+                Continuar
+              </button>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+
       {showDeleteConfirm && (
         <motion.div 
           initial={{ opacity: 0 }}
@@ -1008,7 +1167,7 @@ function AppContent() {
     );
   }
 
-  if (attendees.length === 0) {
+  if (attendees.length === 0 && !isLoadingAttendees && isAdmin) {
     return (
       <div className="min-h-screen bg-neutral-50 flex flex-col font-sans">
         <header className="bg-white border-b border-neutral-200 px-4 py-3">
@@ -1070,32 +1229,69 @@ function AppContent() {
     );
   }
 
+  if (isLoadingAttendees || (attendees.length === 0 && !isAdmin)) {
+    return (
+      <div className="min-h-screen bg-neutral-50 flex flex-col font-sans">
+        <header className="bg-white border-b border-neutral-200 px-4 py-3">
+          <div className="max-w-4xl mx-auto flex items-center justify-between">
+            <button onClick={() => setSelectedEventId(null)} className="text-sm font-bold text-blue-600 hover:text-blue-700">
+              ← Volver a Eventos
+            </button>
+            <h1 className="font-bold text-neutral-900">{selectedEvent.name}</h1>
+            <div className="w-10" />
+          </div>
+        </header>
+
+        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center text-neutral-400">
+          {isLoadingAttendees ? (
+            <>
+              <RefreshCw className="w-12 h-12 animate-spin mb-4 text-blue-500" />
+              <p className="font-medium">Cargando asistentes...</p>
+            </>
+          ) : (
+            <>
+              <Users className="w-12 h-12 opacity-10 mb-4" />
+              <p className="font-medium">No hay asistentes cargados para este evento.</p>
+              {!isAdmin && <p className="text-xs mt-2">Contacta con un administrador para subir el listado.</p>}
+            </>
+          )}
+        </div>
+        {modalsUI}
+        <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-neutral-200 px-6 py-2 z-40">
+          <div className="max-w-md mx-auto flex items-center justify-around gap-2">
+             <button onClick={() => setSelectedEventId(null)} className="flex flex-col items-center gap-0.5 flex-1 py-1 rounded-xl text-neutral-400">
+              <Calendar className="w-5 h-5" />
+              <span className="text-[9px] font-black uppercase">Eventos</span>
+            </button>
+          </div>
+        </nav>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-neutral-50 flex flex-col font-sans pb-24">
       {/* Header */}
       <header className="bg-white border-b border-neutral-200 px-4 py-2 sticky top-0 z-30">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button onClick={() => setSelectedEventId(null)} className="text-blue-600 font-bold text-sm flex items-center gap-1">
-              <span className="text-lg">←</span> {selectedEvent.name}
+        <div className="max-w-4xl mx-auto grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+          <div className="flex items-center justify-start overflow-hidden">
+            <button onClick={() => setSelectedEventId(null)} className="text-blue-600 font-bold text-sm flex items-center gap-1 transition-all active:scale-95 hover:opacity-75 min-w-0">
+              <span className="text-lg flex-shrink-0">←</span> <span className="truncate">{selectedEvent.name}</span>
             </button>
           </div>
-          <h1 className="font-black text-blue-600 leading-tight tracking-tighter text-sm hidden sm:block">TICKETBOOM VALIDATOR</h1>
-          <div className="flex items-center gap-2">
+          <h1 className="font-black text-blue-600 leading-tight tracking-tighter text-[10px] sm:text-xs md:text-sm text-center whitespace-nowrap px-2">TICKETBOOM VALIDATOR</h1>
+          <div className="flex items-center justify-end gap-2">
+            {isAdmin && (
               <button 
-                onClick={() => {
-                  const input = document.createElement('input');
-                  input.type = 'file';
-                  input.accept = '.csv, .xlsx, .xls, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel';
-                  input.onchange = (e: any) => handleFileUpload(e);
-                  input.click();
-                }}
-                className="flex items-center gap-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 px-3 py-2 rounded-xl text-xs font-bold transition-all active:scale-95"
+                onClick={handleReplaceClick}
+                className="flex items-center gap-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-bold transition-all active:scale-95 whitespace-nowrap"
                 title="Actualizar listado (CSV/Excel)"
               >
-                <Upload className="w-4 h-4" />
-                <span>Reemplazar Excel/CSV</span>
+                <Upload className="w-3.5 h-3.5 sm:w-4 h-4" />
+                <span className="hidden md:inline">Reemplazar Excel/CSV</span>
+                <span className="md:hidden">CSV</span>
               </button>
+            )}
           </div>
         </div>
       </header>
@@ -1298,42 +1494,52 @@ function AppContent() {
                     <div 
                       key={attendee['Código QR']}
                       className={cn(
-                        "bg-white border rounded-2xl p-4 flex items-center justify-between transition-all",
+                        "bg-white border rounded-2xl p-4 flex items-center transition-all",
                         attendee.validated ? "border-green-100 bg-green-50/30" : "border-neutral-100"
                       )}
                     >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-bold text-neutral-900 truncate max-w-[200px]">
-                            {attendee.Nombre} {attendee.Apellidos}
-                          </h3>
-                          <span className="text-[9px] bg-neutral-100 text-neutral-500 px-1.5 py-0.5 rounded font-mono">
+                      <div className="flex-1 min-w-0 pr-2">
+                        <h3 className="font-bold text-neutral-900 truncate">
+                          {attendee.Nombre} {attendee.Apellidos}
+                        </h3>
+                        <p className="text-[10px] text-neutral-500 truncate mt-0.5">
+                          {attendee['Correo electrónico']}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-[9px] bg-neutral-100 text-neutral-500 px-1.5 py-0.5 rounded font-mono uppercase tracking-wider">
                             #{attendee['Código QR']}
                           </span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <p className="text-[10px] text-neutral-500 truncate max-w-[180px]">{attendee['Correo electrónico']}</p>
                           {attendee.validated && (
-                            <div className="flex items-center gap-1.5 bg-green-100/50 text-green-700 px-2 py-0.5 rounded-full">
+                            <div className="flex items-center gap-1 text-green-600">
                               <Check className="w-2.5 h-2.5" />
-                              <span className="text-[9px] font-black uppercase tracking-tight">
+                              <span className="text-[8px] font-black uppercase">
                                 {attendee.validationTime || 'Validado'}
                               </span>
                             </div>
                           )}
                         </div>
+                        
+                        <button 
+                          onClick={() => toggleManualValidation(attendee)}
+                          className={cn(
+                            "w-12 h-12 rounded-xl flex items-center justify-center transition-all active:scale-90 flex-shrink-0",
+                            attendee.validated 
+                              ? "bg-green-600 text-white shadow-lg shadow-green-100" 
+                              : "bg-neutral-100 text-neutral-500 hover:bg-neutral-200",
+                            attendee.validated && !isAdmin && "opacity-80 cursor-default active:scale-100 shadow-none"
+                          )}
+                          disabled={attendee.validated && !isAdmin}
+                        >
+                          {attendee.validated ? (
+                            <Check className="w-6 h-6" />
+                          ) : (
+                            <span className="text-[10px] font-black leading-none text-center">VALIDAR</span>
+                          )}
+                        </button>
                       </div>
-                      <button 
-                        onClick={() => toggleManualValidation(attendee)}
-                        className={cn(
-                          "w-12 h-12 rounded-xl flex items-center justify-center transition-all active:scale-90",
-                          attendee.validated 
-                            ? "bg-green-600 text-white shadow-lg shadow-green-100" 
-                            : "bg-neutral-100 text-neutral-400 hover:bg-neutral-200"
-                        )}
-                      >
-                        {attendee.validated ? <Check className="w-6 h-6" /> : <Users className="w-5 h-5" />}
-                      </button>
                     </div>
                   ))
                 ) : (
