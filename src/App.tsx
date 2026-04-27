@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, ChangeEvent } from 'react';
 import Papa from 'papaparse';
-import { read, utils } from 'xlsx';
+import * as XLSX from 'xlsx';
+const { read, utils } = XLSX;
 import { 
   QrCode, 
   Users, 
