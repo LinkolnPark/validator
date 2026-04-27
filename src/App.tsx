@@ -1284,12 +1284,11 @@ function AppContent() {
             {isAdmin && (
               <button 
                 onClick={handleReplaceClick}
-                className="flex items-center gap-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[10px] sm:text-xs font-bold transition-all active:scale-95 whitespace-nowrap"
+                className="flex items-center gap-1 sm:gap-1.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 px-1.5 min-[400px]:px-2 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[8px] min-[400px]:text-[9px] min-[450px]:text-[10px] sm:text-xs font-bold transition-all active:scale-95 whitespace-nowrap"
                 title="Actualizar listado (CSV/Excel)"
               >
-                <Upload className="w-3.5 h-3.5 sm:w-4 h-4" />
-                <span className="hidden md:inline">Reemplazar Excel/CSV</span>
-                <span className="md:hidden">CSV</span>
+                <Upload className="w-3 h-3 sm:w-4 h-4 flex-shrink-0" />
+                <span>Reemplazar Excel/CSV</span>
               </button>
             )}
           </div>
