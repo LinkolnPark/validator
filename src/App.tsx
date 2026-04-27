@@ -452,7 +452,7 @@ function AppContent() {
     const now = Date.now();
     if (lastScannedRef.current && 
         lastScannedRef.current.code === qrCode && 
-        now - lastScannedRef.current.time < 2000) {
+        now - lastScannedRef.current.time < 3000) {
       return;
     }
 
