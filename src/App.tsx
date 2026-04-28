@@ -136,14 +136,20 @@ function AppContent() {
         osc.start(ctx.currentTime);
         osc.stop(ctx.currentTime + 0.3);
       } else {
-        // Low harsh buzz - Sawtooth is already quite loud
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(150, ctx.currentTime);
-        osc.frequency.linearRampToValueAtTime(100, ctx.currentTime + 0.4);
+        // Firm double-tone error - loud and clear but less "buzzer-like"
+        osc.type = 'square';
         
+        // Note 1
+        osc.frequency.setValueAtTime(200, ctx.currentTime);
         gain.gain.setValueAtTime(0, ctx.currentTime);
-        gain.gain.linearRampToValueAtTime(0.6, ctx.currentTime + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+        gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + 0.01);
+        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.15);
+        
+        // Note 2
+        osc.frequency.setValueAtTime(140, ctx.currentTime + 0.18);
+        gain.gain.setValueAtTime(0, ctx.currentTime + 0.18);
+        gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + 0.19);
+        gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.45);
         
         osc.start(ctx.currentTime);
         osc.stop(ctx.currentTime + 0.5);
@@ -673,6 +679,26 @@ function AppContent() {
                 },
                 () => {}
               );
+
+              // Safe focus implementation: Try to apply focus constraints after start
+              try {
+                const videoElement = document.querySelector("#reader video") as HTMLVideoElement;
+                if (videoElement && videoElement.srcObject) {
+                  const stream = videoElement.srcObject as MediaStream;
+                  const track = stream.getVideoTracks()[0];
+                  if (track) {
+                    const capabilities = (track as any).getCapabilities?.() || {};
+                    if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+                      await track.applyConstraints({
+                        advanced: [{ focusMode: 'continuous' }] as any
+                      });
+                      console.log("Continuous focus applied successfully");
+                    }
+                  }
+                }
+              } catch (focusErr) {
+                console.warn("Could not apply autofocus constraints:", focusErr);
+              }
               
               if (isMounted) {
                 html5QrCodeRef.current = currentScanner;
