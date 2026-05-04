@@ -16,6 +16,7 @@ import {
   Calendar,
   MapPin,
   Trash2,
+  Pencil,
   Lock,
   ShieldCheck,
   LogOut
@@ -66,6 +67,8 @@ function AppContent() {
   const [showSetPasswordModal, setShowSetPasswordModal] = useState(false);
   const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [editingEventName, setEditingEventName] = useState('');
   const [adminUser, setAdminUser] = useState('');
   const [isAdmin, setIsAdmin] = useState(() => localStorage.getItem('isAdmin') === 'true');
 
@@ -323,6 +326,18 @@ function AppContent() {
       handleFirestoreError(error, OperationType.DELETE, `events/${eventId}`);
     } finally {
       setIsDeleting(false);
+    }
+  };
+
+  const updateEventName = async (eventId: string, newName: string) => {
+    if (!isAdmin || !newName.trim()) return;
+    try {
+      await updateDoc(doc(db, 'events', eventId), {
+        name: newName.trim()
+      });
+      setEditingEventId(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `events/${eventId}`);
     }
   };
 
@@ -600,8 +615,11 @@ function AppContent() {
         setCameraError(null);
         setIsScannerActive(false);
         
-        // Wait for AnimatePresence and DOM rendering
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        // Start loading library immediately while we wait for the animation
+        const libPromise = import('html5-qrcode');
+        
+        // Wait for AnimatePresence and DOM rendering (reduced to 300ms)
+        await new Promise(resolve => setTimeout(resolve, 300));
         
         if (!isMounted) {
           setIsInitializingScanner(false);
@@ -610,7 +628,8 @@ function AppContent() {
 
         let readerElement = document.getElementById("reader");
         if (!readerElement) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+          // Fallback wait if animation is slower than expected
+          await new Promise(resolve => setTimeout(resolve, 300));
           readerElement = document.getElementById("reader");
         }
         
@@ -621,7 +640,7 @@ function AppContent() {
         }
 
         try {
-          const { Html5Qrcode, Html5QrcodeScannerState } = await import('html5-qrcode');
+          const { Html5Qrcode, Html5QrcodeScannerState } = await libPromise;
           
           if (html5QrCodeRef.current) {
             try {
@@ -1161,19 +1180,53 @@ function AppContent() {
                         {event.createdAt?.toDate ? event.createdAt.toDate().toLocaleDateString() : 'Reciente'}
                       </div>
                       {isAdmin && (
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowDeleteConfirm(event.id);
-                          }}
-                          className="p-2 text-neutral-300 hover:text-red-500 transition-colors"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex gap-1">
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingEventId(event.id);
+                              setEditingEventName(event.name);
+                            }}
+                            className="p-2 text-neutral-300 hover:text-blue-500 transition-colors"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowDeleteConfirm(event.id);
+                            }}
+                            className="p-2 text-neutral-300 hover:text-red-500 transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
-                  <h3 className="text-xl font-bold text-neutral-900 mb-1">{event.name}</h3>
+                  {editingEventId === event.id ? (
+                    <div className="flex items-center gap-2 mb-1" onClick={(e) => e.stopPropagation()}>
+                      <input 
+                        type="text"
+                        value={editingEventName}
+                        onChange={(e) => setEditingEventName(e.target.value)}
+                        className="flex-1 bg-neutral-50 border border-neutral-200 rounded-lg px-3 py-1 text-base font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') updateEventName(event.id, editingEventName);
+                          if (e.key === 'Escape') setEditingEventId(null);
+                        }}
+                      />
+                      <button 
+                        onClick={() => updateEventName(event.id, editingEventName)}
+                        className="bg-green-600 text-white p-1.5 rounded-lg shadow-sm"
+                      >
+                        <Check className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <h3 className="text-xl font-bold text-neutral-900 mb-1">{event.name}</h3>
+                  )}
                   <div className="flex items-center gap-2 text-neutral-500 text-sm">
                     <MapPin className="w-4 h-4" />
                     <span>Seleccionar para validar</span>
