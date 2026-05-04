@@ -604,16 +604,28 @@ function AppContent() {
   };
 
   const isScannerStoppingRef = useRef(false);
+  const initScannerRef = useRef<number>(0);
 
   useEffect(() => {
     let isMounted = true;
     let currentScanner: any = null;
 
+    const currentInitId = ++initScannerRef.current;
+
     const initScanner = async () => {
-      if (activeTab === 'scan' && attendees.length > 0 && selectedEvent && !isInitializingScanner && !isScannerStoppingRef.current) {
+      if (activeTab === 'scan' && attendees.length > 0 && selectedEvent && !isScannerStoppingRef.current) {
         setIsInitializingScanner(true);
         setCameraError(null);
         setIsScannerActive(false);
+        
+        // Suppress benign play() interruption errors globally for this component
+        const handleRejection = (e: PromiseRejectionEvent) => {
+          if (e.reason?.message?.includes('play() request was interrupted') || 
+              e.reason?.message?.includes('media was removed')) {
+            e.preventDefault();
+          }
+        };
+        window.addEventListener('unhandledrejection', handleRejection);
         
         // Start loading library immediately while we wait for the animation
         const libPromise = import('html5-qrcode');
@@ -621,20 +633,20 @@ function AppContent() {
         // Wait for AnimatePresence and DOM rendering (reduced to 300ms)
         await new Promise(resolve => setTimeout(resolve, 300));
         
-        if (!isMounted) {
+        if (!isMounted || activeTab !== 'scan' || currentInitId !== initScannerRef.current) {
+          window.removeEventListener('unhandledrejection', handleRejection);
           setIsInitializingScanner(false);
           return;
         }
 
         let readerElement = document.getElementById("reader");
         if (!readerElement) {
-          // Fallback wait if animation is slower than expected
-          await new Promise(resolve => setTimeout(resolve, 300));
+          await new Promise(resolve => setTimeout(resolve, 400));
           readerElement = document.getElementById("reader");
         }
         
-        if (!readerElement || readerElement.clientWidth === 0) {
-          console.warn("Reader element not ready or has no width");
+        if (!readerElement || readerElement.clientWidth === 0 || activeTab !== 'scan' || currentInitId !== initScannerRef.current) {
+          window.removeEventListener('unhandledrejection', handleRejection);
           setIsInitializingScanner(false);
           return;
         }
@@ -642,32 +654,34 @@ function AppContent() {
         try {
           const { Html5Qrcode, Html5QrcodeScannerState } = await libPromise;
           
-          if (html5QrCodeRef.current) {
-            try {
-              const oldScanner = html5QrCodeRef.current;
-              const readerExists = document.getElementById("reader");
-              if (readerExists) {
-                const state = oldScanner.getState();
-                if (state === Html5QrcodeScannerState.SCANNING || state === Html5QrcodeScannerState.PAUSED) {
-                  await oldScanner.stop();
-                }
-                if (readerExists.children.length > 0) {
-                  await oldScanner.clear();
-                }
-              }
-            } catch (e) {
-              const reader = document.getElementById("reader");
-              if (reader) reader.innerHTML = "";
-            }
-            html5QrCodeRef.current = null;
-          }
-
-          if (!isMounted) {
+          if (!isMounted || activeTab !== 'scan' || currentInitId !== initScannerRef.current) {
+            window.removeEventListener('unhandledrejection', handleRejection);
             setIsInitializingScanner(false);
             return;
           }
 
-          currentScanner = new Html5Qrcode("reader", { verbose: false });
+          // Cleanup previous instance if any
+          if (html5QrCodeRef.current) {
+            const oldScanner = html5QrCodeRef.current;
+            html5QrCodeRef.current = null;
+            try {
+              const state = oldScanner.getState();
+              if (state === Html5QrcodeScannerState.SCANNING || state === Html5QrcodeScannerState.PAUSED) {
+                await oldScanner.stop().catch(() => {});
+              }
+              if (document.getElementById("reader")) {
+                await oldScanner.clear().catch(() => {});
+              }
+            } catch (e) {}
+          }
+
+          if (!isMounted || activeTab !== 'scan' || currentInitId !== initScannerRef.current) {
+            window.removeEventListener('unhandledrejection', handleRejection);
+            setIsInitializingScanner(false);
+            return;
+          }
+
+          const currentScanner = new Html5Qrcode("reader", { verbose: false });
           
           const config = { 
             fps: 20, 
@@ -680,78 +694,80 @@ function AppContent() {
           
           try {
             const cameras = await Html5Qrcode.getCameras();
-            if (cameras && cameras.length > 0) {
+            if (cameras && cameras.length > 0 && isMounted && activeTab === 'scan' && currentInitId === initScannerRef.current) {
               const back = cameras.find((c: any) => /back|trasera|rear|environment/i.test(c.label));
               targetCameraId = back ? back.id : cameras[0].id;
             }
-          } catch (e) {
-            console.warn("getCameras failed", e);
+          } catch (e) {}
+
+          if (!isMounted || activeTab !== 'scan' || currentInitId !== initScannerRef.current) {
+            try { currentScanner.clear(); } catch (e) {}
+            window.removeEventListener('unhandledrejection', handleRejection);
+            setIsInitializingScanner(false);
+            return;
           }
 
-          if (isMounted) {
-            try {
-              await currentScanner.start(
-                targetCameraId, 
-                config,
-                (decodedText: string) => {
-                  validateTicket(decodedText);
-                },
-                () => {}
-              );
+          // START
+          try {
+            await currentScanner.start(
+              targetCameraId, 
+              config,
+              (decodedText: string) => {
+                if (activeTab === 'scan') validateTicket(decodedText);
+              },
+              () => {}
+            );
 
-              // Safe focus implementation: Try to apply focus constraints after start
+            if (isMounted && activeTab === 'scan' && currentInitId === initScannerRef.current) {
+              // Focus optimization
               try {
-                const videoElement = document.querySelector("#reader video") as HTMLVideoElement;
-                if (videoElement && videoElement.srcObject) {
-                  const stream = videoElement.srcObject as MediaStream;
-                  const track = stream.getVideoTracks()[0];
-                  if (track) {
-                    const capabilities = (track as any).getCapabilities?.() || {};
-                    if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-                      await track.applyConstraints({
-                        advanced: [{ focusMode: 'continuous' }] as any
-                      });
-                      console.log("Continuous focus applied successfully");
+                const video = document.querySelector("#reader video") as HTMLVideoElement;
+                if (video?.srcObject) {
+                  const track = (video.srcObject as MediaStream).getVideoTracks()[0];
+                  if (track && (track as any).getCapabilities) {
+                    const caps = (track as any).getCapabilities();
+                    if (caps.focusMode?.includes('continuous')) {
+                      await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] } as any);
                     }
                   }
                 }
-              } catch (focusErr) {
-                console.warn("Could not apply autofocus constraints:", focusErr);
+              } catch (e) {}
+
+              html5QrCodeRef.current = currentScanner;
+              setIsScannerActive(true);
+            } else {
+              // Cancelled during start
+              if (currentScanner.getState() !== Html5QrcodeScannerState.NOT_STARTED) {
+                await currentScanner.stop().catch(() => {});
               }
-              
-              if (isMounted) {
-                html5QrCodeRef.current = currentScanner;
-                setIsScannerActive(true);
-              } else {
-                // If we unmounted while starting, stop immediately
-                if (currentScanner.getState() !== Html5QrcodeScannerState.NOT_STARTED) {
-                  await currentScanner.stop();
-                  await currentScanner.clear();
-                }
-              }
-            } catch (startError: any) {
-              if (startError?.message?.includes("play() request was interrupted") || startError?.message?.includes("media was removed")) {
-                console.warn("Scanner start interrupted by DOM removal");
-                return;
-              }
-              throw startError;
+              try { currentScanner.clear(); } catch (e) {}
+            }
+          } catch (startError: any) {
+            const errorMsg = startError?.message || String(startError);
+            if (errorMsg.includes("play() request was interrupted") || 
+                errorMsg.includes("media was removed") ||
+                !isMounted || activeTab !== 'scan' || currentInitId !== initScannerRef.current) {
+              // Benign
+            } else {
+              console.error("Scanner failed to start:", startError);
+              let msg = "No se pudo iniciar la cámara.";
+              if (errorMsg.includes("Permission denied")) msg = "Permiso de cámara denegado.";
+              else if (errorMsg.includes("NotFound")) msg = "No se encontró cámara.";
+              setCameraError(msg);
             }
           }
         } catch (err: any) {
-          console.error("Scanner start error:", err);
-          if (isMounted) {
-            let msg = "No se pudo iniciar la cámara.";
-            if (err?.message?.includes("Permission denied")) msg = "Permiso de cámara denegado. Por favor, actívalo en los ajustes del navegador.";
-            else if (err?.message?.includes("NotFound")) msg = "No se encontró ninguna cámara disponible.";
-            else msg = err?.message || msg;
-            
-            setCameraError(msg);
-            setIsScannerActive(false);
+          if (isMounted && activeTab === 'scan' && currentInitId === initScannerRef.current) {
+            const errorMsg = err?.message || String(err);
+            if (!errorMsg.includes("play() request was interrupted") && !errorMsg.includes("media was removed")) {
+              console.error("Critical scanner failure:", err);
+            }
           }
         } finally {
-          if (isMounted) {
+          if (isMounted && currentInitId === initScannerRef.current) {
             setIsInitializingScanner(false);
           }
+          window.removeEventListener('unhandledrejection', handleRejection);
         }
       }
     };
@@ -768,12 +784,13 @@ function AppContent() {
           try {
             const state = s.getState();
             if (state !== 1) { // 1 is Html5QrcodeScannerState.NOT_STARTED
-              try {
-                await s.stop();
-              } catch (e) {}
-              try {
-                await s.clear();
-              } catch (e) {}
+              if (state === 2 || state === 3) { // SCANNING or PAUSED
+                await s.stop().catch(() => {});
+              }
+              const reader = document.getElementById("reader");
+              if (reader) {
+                try { s.clear(); } catch (e) {}
+              }
             }
           } catch (e) {
             console.warn("Cleanup error during unmount:", e);
@@ -784,7 +801,7 @@ function AppContent() {
       };
       cleanupScanner();
     };
-  }, [activeTab, attendees.length, selectedEvent, scannerRetry]);
+  }, [activeTab, selectedEventId, scannerRetry]);
 
   const filteredAttendees = useMemo(() => {
     const q = searchQuery.toLowerCase();
