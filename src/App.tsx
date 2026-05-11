@@ -582,11 +582,6 @@ function AppContent() {
   const toggleManualValidation = async (attendee: Attendee) => {
     if (!selectedEvent) return;
     
-    // Solo permitir desmarcar si es admin
-    if (attendee.validated && !isAdmin) {
-      return;
-    }
-
     try {
       const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const attendeeRef = doc(db, 'events', selectedEvent.id, 'attendees', getSafeId(attendee['Código QR']));
@@ -676,17 +671,10 @@ function AppContent() {
             showTorchButtonIfSupported: true
           };
 
-          let targetCameraId: any = { facingMode: "environment" };
-          
-          try {
-            const cameras = await Html5Qrcode.getCameras();
-            if (cameras && cameras.length > 0) {
-              const back = cameras.find((c: any) => /back|trasera|rear|environment/i.test(c.label));
-              targetCameraId = back ? back.id : cameras[0].id;
-            }
-          } catch (e) {
-            console.warn("getCameras failed", e);
-          }
+          // Strictly use environment facing mode to ensure rear camera is used
+          // This is the most platform-agnostic way to request the back camera
+          // across all mobile browsers and systems.
+          const targetCameraId = { facingMode: "environment" };
 
           if (isMounted) {
             try {
@@ -1606,9 +1594,7 @@ function AppContent() {
                             attendee.validated 
                               ? "bg-green-600 text-white shadow-lg shadow-green-100" 
                               : "bg-neutral-100 text-neutral-500 hover:bg-neutral-200",
-                            attendee.validated && !isAdmin && "opacity-80 cursor-default active:scale-100 shadow-none"
                           )}
-                          disabled={attendee.validated && !isAdmin}
                         >
                           {attendee.validated ? (
                             <Check className="w-6 h-6" />
