@@ -203,6 +203,22 @@ function AppContent() {
     localStorage.setItem('isAdmin', isAdmin.toString());
   }, [isAdmin]);
 
+  // Click outside to cancel event editing
+  useEffect(() => {
+    if (!editingEventId) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // If clicked outside the edit container and NOT the pencil button that opened it
+      if (!target.closest(`[id^="edit-event-"]`) && !target.closest('.edit-pencil-btn')) {
+        setEditingEventId(null);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [editingEventId]);
+
   // Events Listener
   useEffect(() => {
     const q = query(collection(db, 'events'), orderBy('createdAt', 'desc'));
@@ -1171,10 +1187,14 @@ function AppContent() {
                           <button 
                             onClick={(e) => {
                               e.stopPropagation();
-                              setEditingEventId(event.id);
-                              setEditingEventName(event.name);
+                              if (editingEventId === event.id) {
+                                setEditingEventId(null);
+                              } else {
+                                setEditingEventId(event.id);
+                                setEditingEventName(event.name);
+                              }
                             }}
-                            className="p-2 text-neutral-300 hover:text-blue-500 transition-colors"
+                            className="p-2 text-neutral-300 hover:text-blue-500 transition-colors edit-pencil-btn"
                           >
                             <Pencil className="w-4 h-4" />
                           </button>
@@ -1192,21 +1212,33 @@ function AppContent() {
                     </div>
                   </div>
                   {editingEventId === event.id ? (
-                    <div className="flex items-center gap-2 mb-1" onClick={(e) => e.stopPropagation()}>
+                    <div 
+                      className="flex items-center gap-2 mb-1" 
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter') {
+                          updateEventName(event.id, editingEventName);
+                        }
+                        if (e.key === 'Escape') {
+                          setEditingEventId(null);
+                        }
+                      }}
+                    >
                       <input 
                         type="text"
+                        id={`edit-event-${event.id}`}
                         value={editingEventName}
                         onChange={(e) => setEditingEventName(e.target.value)}
                         className="flex-1 bg-neutral-50 border border-neutral-200 rounded-lg px-3 py-1 text-base font-bold focus:ring-2 focus:ring-blue-500 outline-none"
                         autoFocus
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') updateEventName(event.id, editingEventName);
-                          if (e.key === 'Escape') setEditingEventId(null);
-                        }}
                       />
                       <button 
-                        onClick={() => updateEventName(event.id, editingEventName)}
-                        className="bg-green-600 text-white p-1.5 rounded-lg shadow-sm"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateEventName(event.id, editingEventName);
+                        }}
+                        className="bg-green-600 text-white p-1.5 rounded-lg shadow-sm hover:bg-green-700 transition-colors"
                       >
                         <Check className="w-4 h-4" />
                       </button>
