@@ -94,6 +94,7 @@ function AppContent() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [csvError, setCsvError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatusText, setUploadStatusText] = useState<string>('');
   const [isDeleting, setIsDeleting] = useState(false);
   const [isLoadingAttendees, setIsLoadingAttendees] = useState(false);
   const [showReplaceConfirm, setShowReplaceConfirm] = useState(false);
@@ -359,6 +360,9 @@ function AppContent() {
 
   const handleFileUpload = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    if (e.target) {
+      e.target.value = '';
+    }
     if (!file || !selectedEvent) return;
 
     // Define password on first upload if not set
@@ -385,6 +389,7 @@ function AppContent() {
     if (!selectedEvent) return;
     setCsvError(null);
     setIsUploading(true);
+    setUploadStatusText('Procesando archivo...');
 
     const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
 
@@ -402,11 +407,13 @@ function AppContent() {
         } catch (error) {
           setCsvError('Error al procesar el archivo Excel: ' + (error instanceof Error ? error.message : String(error)));
           setIsUploading(false);
+          setUploadStatusText('');
         }
       };
       reader.onerror = () => {
         setCsvError('Error al leer el archivo.');
         setIsUploading(false);
+        setUploadStatusText('');
       };
       reader.readAsBinaryString(file);
     } else {
@@ -420,6 +427,7 @@ function AppContent() {
         error: (error) => {
           setCsvError('Error al procesar el archivo CSV: ' + error.message);
           setIsUploading(false);
+          setUploadStatusText('');
         }
       });
     }
@@ -435,25 +443,53 @@ function AppContent() {
     if (data.length === 0) {
       setCsvError('El archivo está vacío.');
       setIsUploading(false);
+      setUploadStatusText('');
       return;
     }
 
     if (!data[0].hasOwnProperty('Código QR')) {
       setCsvError('El archivo no tiene la columna requerida "Código QR".');
       setIsUploading(false);
+      setUploadStatusText('');
+      return;
+    }
+
+    const validRows = data.filter((row: any) => {
+      const qrCode = (row['Código QR'] || '').toString().trim();
+      return qrCode.length > 0;
+    });
+
+    if (validRows.length === 0) {
+      setCsvError('El archivo no contiene filas válidas con "Código QR".');
+      setIsUploading(false);
+      setUploadStatusText('');
       return;
     }
 
     try {
+      const attendeesCol = collection(db, 'events', selectedEvent.id, 'attendees');
+
+      // 1. Eliminar los asistentes anteriores en bloques para reemplazar totalmente la lista
+      setUploadStatusText('Eliminando listado anterior...');
+      const existingSnapshot = await getDocs(attendeesCol);
+      if (!existingSnapshot.empty) {
+        const existingDocs = existingSnapshot.docs;
+        for (let i = 0; i < existingDocs.length; i += 400) {
+          const chunk = existingDocs.slice(i, i + 400);
+          const deleteBatch = writeBatch(db);
+          chunk.forEach(docSnap => deleteBatch.delete(docSnap.ref));
+          await deleteBatch.commit();
+        }
+      }
+
+      // 2. Guardar los nuevos asistentes en bloques de hasta 400
+      setUploadStatusText(`Guardando ${validRows.length} asistentes nuevos...`);
       let batch = writeBatch(db);
       let currentBatchSize = 0;
-      const attendeesCol = collection(db, 'events', selectedEvent.id, 'attendees');
       
-      for (let i = 0; i < data.length; i++) {
-        const row = data[i];
+      for (let i = 0; i < validRows.length; i++) {
+        const row = validRows[i];
         const qrCode = (row['Código QR'] || '').toString().trim();
-        
-        if (!qrCode) continue;
 
         const attendeeData: Attendee = {
           Nombre: row.Nombre || '',
@@ -479,7 +515,7 @@ function AppContent() {
         batch.set(docRef, attendeeData);
         currentBatchSize++;
 
-        if (currentBatchSize >= 500 || i === data.length - 1) {
+        if (currentBatchSize >= 400 || i === validRows.length - 1) {
           if (currentBatchSize > 0) {
             await batch.commit();
             batch = writeBatch(db);
@@ -489,11 +525,14 @@ function AppContent() {
       }
       
       setIsUploading(false);
+      setUploadStatusText('');
       setLastScanResult(null);
-      setShowUploadSuccess(data.length);
+      setScanHistory([]);
+      setShowUploadSuccess(validRows.length);
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `events/${selectedEvent.id}/attendees`);
+      setUploadStatusText('');
       setIsUploading(false);
+      handleFirestoreError(error, OperationType.WRITE, `events/${selectedEvent.id}/attendees`);
     }
   };
 
@@ -853,9 +892,11 @@ function AppContent() {
                 <Upload className="w-8 h-8" />
               </motion.div>
             </div>
-            <h3 className="text-xl font-bold text-neutral-900 mb-2">Importando datos...</h3>
+            <h3 className="text-xl font-bold text-neutral-900 mb-2">
+              {uploadStatusText || 'Importando datos...'}
+            </h3>
             <p className="text-neutral-500 text-sm">
-              Estamos procesando el listado de asistentes y actualizando la base de datos. Por favor, no cierres la aplicación.
+              Estamos sustituyendo el listado de asistentes y actualizando la base de datos. Por favor, no cierres la aplicación.
             </p>
           </motion.div>
         </motion.div>
