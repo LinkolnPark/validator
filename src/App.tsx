@@ -655,6 +655,14 @@ function AppContent() {
 
   const isScannerStoppingRef = useRef(false);
 
+  const handleRetryPermissions = () => {
+    // Save current event so page reload resumes immediately in the scanner view
+    if (selectedEventId) {
+      localStorage.setItem('selectedEventId', selectedEventId);
+    }
+    window.location.reload();
+  };
+
   useEffect(() => {
     let isMounted = true;
     let currentScanner: any = null;
@@ -781,12 +789,34 @@ function AppContent() {
             }
           }
         } catch (err: any) {
-          console.error("Scanner start error:", err);
+          const errMsg = err?.message || String(err);
+          const errName = err?.name || '';
+          const isNotFound = errName === 'NotFoundError' || 
+            errMsg.includes('NotFound') || 
+            errMsg.includes('Requested device not found') || 
+            errMsg.includes('DevicesNotFoundError');
+          const isPermissionDenied = errName === 'NotAllowedError' || 
+            errName === 'PermissionDeniedError' || 
+            errMsg.includes('Permission denied') || 
+            errMsg.includes('NotAllowedError');
+
+          if (isNotFound) {
+            console.warn("Aviso de escáner: Cámara no encontrada");
+          } else if (isPermissionDenied) {
+            console.warn("Aviso de escáner: Permiso de cámara denegado");
+          } else {
+            console.warn("Aviso al iniciar escáner:", errMsg);
+          }
+
           if (isMounted) {
             let msg = "No se pudo iniciar la cámara.";
-            if (err?.message?.includes("Permission denied")) msg = "Permiso de cámara denegado. Por favor, actívalo en los ajustes del navegador.";
-            else if (err?.message?.includes("NotFound")) msg = "No se encontró ninguna cámara disponible.";
-            else msg = err?.message || msg;
+            if (isNotFound) {
+              msg = "Cámara no encontrada";
+            } else if (isPermissionDenied) {
+              msg = "Permiso de cámara denegado. Accede a opciones del navegador y concede los permisos de cámara.";
+            } else {
+              msg = errMsg || msg;
+            }
             
             setCameraError(msg);
             setIsScannerActive(false);
@@ -1523,30 +1553,45 @@ function AppContent() {
                     <RefreshCw className="w-8 h-8 animate-spin mb-4 text-blue-500" />
                     <p className="text-sm font-medium">Iniciando cámara...</p>
                     <button 
-                      onClick={() => setScannerRetry(prev => prev + 1)}
-                      className="mt-4 text-xs text-blue-400 underline"
+                      onClick={handleRetryPermissions}
+                      className="mt-4 text-xs text-blue-400 underline hover:text-blue-300"
                     >
-                      ¿Tarda demasiado? Reintentar
+                      ¿Tarda demasiado? Recargar y reintentar
                     </button>
                   </div>
                 )}
                 {cameraError && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-900 text-white p-8 text-center">
-                    <XCircle className="w-12 h-12 text-red-500 mb-4" />
-                    <p className="font-bold text-lg mb-2">Cámara Bloqueada</p>
-                    <p className="text-xs text-neutral-400 mb-6">{cameraError}</p>
-                    <div className="flex flex-col gap-3 w-full">
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-neutral-900 text-white p-6 text-center z-10">
+                    <div className="w-14 h-14 rounded-2xl bg-neutral-800 flex items-center justify-center mb-3">
+                      {cameraError.includes("encontrada") ? (
+                        <QrCode className="w-7 h-7 text-neutral-400" />
+                      ) : (
+                        <AlertCircle className="w-7 h-7 text-amber-500" />
+                      )}
+                    </div>
+                    <p className="font-bold text-base mb-1.5">
+                      {cameraError.includes("encontrada") 
+                        ? "Cámara no encontrada" 
+                        : "Permiso de cámara necesario"}
+                    </p>
+                    <p className="text-xs text-neutral-400 mb-5 max-w-[240px] leading-relaxed">
+                      {cameraError.includes("encontrada") 
+                        ? "No se ha detectado ninguna cámara trasera disponible en este dispositivo."
+                        : "Accede a opciones del navegador y concede los permisos de cámara. Luego pulsa para recargar y aplicar los cambios."}
+                    </p>
+                    <div className="flex flex-col gap-2.5 w-full max-w-[210px]">
                       <button 
-                        onClick={() => setScannerRetry(prev => prev + 1)}
-                        className="bg-blue-600 text-white px-6 py-3 rounded-2xl font-bold text-sm active:scale-95 transition-all shadow-lg shadow-blue-900/20"
+                        onClick={handleRetryPermissions}
+                        className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl font-bold text-xs active:scale-95 transition-all shadow-lg shadow-blue-900/30 flex items-center justify-center gap-1.5"
                       >
-                        Reintentar Permisos
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Recargar y reintentar</span>
                       </button>
                       <button 
                         onClick={() => setActiveTab('list')}
-                        className="bg-neutral-800 text-white px-6 py-3 rounded-2xl font-bold text-sm active:scale-95 transition-all"
+                        className="bg-neutral-800 hover:bg-neutral-700 text-neutral-300 px-4 py-2.5 rounded-xl font-bold text-xs active:scale-95 transition-all"
                       >
-                        Validar Manualmente
+                        Validar manualmente
                       </button>
                     </div>
                   </div>
